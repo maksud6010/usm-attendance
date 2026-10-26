@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1e4e79">
+<title>USM হাজিরা</title>
+<!--
+  USM external attendance client (Phase 4.2). Host on any HTTPS static host (camera + GPS need HTTPS).
+  Transport: POST text/plain JSON to the Apps Script /exec URL, redirect follow, credentials omit, token in body.
+  The server decides IN/OUT, work date, branch, geofence and face match; this page only captures.
+-->
+<!-- Face library + models: SELF-HOSTED, pinned @vladmandic/face-api 1.7.13 (no live CDN in production).
+     tools/vendor-face-api.sh builds vendor/face-api/ (face-api.js + tiny_face_detector, face_landmark_68, face_recognition);
+     upload that folder next to this page. The integrity hash pins the exact library version. -->
+<script data-faceapi data-version="1.7.13" src="vendor/face-api/face-api.js" data-model="vendor/face-api/model"
+        integrity="sha384-5SEinnOIOK1Nl6bzEIWwfXWMg4EaJhN2bXKgrjYC0Bq+fYNZHwhD3ntM92lTHnfL" crossorigin="anonymous"></script>
+<style>
+  :root { --bg:#f3f5f8; --card:#fff; --ink:#1b2430; --muted:#5d6b7a; --pri:#1e4e79; --ok:#1b7f4b; --bad:#b3261e; --line:#dde3ea; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#11161c; --card:#1a2129; --ink:#e7edf3; --muted:#9aa8b6; --pri:#6aa5d8; --ok:#5cc28c; --bad:#ff8a80; --line:#2a333d; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, "Noto Sans Bengali", sans-serif; background:var(--bg); color:var(--ink); }
+  .wrap { max-width:460px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:12px; }
+  h1 { font-size:20px; margin:4px 0 12px; } .muted { color:var(--muted); font-size:13px; }
+  input, button { width:100%; font:inherit; padding:12px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--ink); }
+  button { background:var(--pri); color:#fff; border:0; font-weight:600; margin-top:8px; } button.sec { background:transparent; color:var(--pri); border:1px solid var(--pri); }
+  button:disabled { opacity:.5; }
+  label { display:block; font-size:13px; margin:10px 0 4px; color:var(--muted); }
+  video { width:100%; border-radius:12px; background:#000; aspect-ratio:3/4; object-fit:cover; transform:scaleX(-1); }
+  .big { font-size:28px; font-weight:700; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .hidden { display:none; } pre { white-space:pre-wrap; font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card" id="cfg">
+    <h1>সেটআপ</h1>
+    <label>Apps Script /exec URL</label><input id="url" placeholder="https://script.google.com/macros/s/…/exec">
+    <button id="saveUrl">সংরক্ষণ</button>
+  </div>
+  <div class="card hidden" id="login">
+    <h1>লগইন</h1>
+    <label>ইউজারনেম</label><input id="u" autocomplete="username">
+    <label>পাসওয়ার্ড</label><input id="p" type="password" autocomplete="current-password">
+    <button id="doLogin">লগইন</button>
+    <button class="sec" id="doKiosk">ম্যানেজার: এই ডিভাইসে কিয়স্ক চালু করুন</button>
+    <p id="lmsg" class="bad"></p>
+  </div>
+  <div class="card hidden" id="kpick">
+    <h1>কিয়স্ক শাখা</h1><div id="kbranches"></div><p class="muted">কিয়স্ক চালু হলে এই ডিভাইস শুধু এই শাখার হাজিরা নেবে।</p>
+  </div>
+  <div class="hidden" id="kiosk">
+    <div class="card"><div class="muted">কিয়স্ক</div><div class="big" id="kname">—</div><p id="kmsg"></p></div>
+    <div class="card"><video id="kv" autoplay playsinline muted></video><div class="muted" id="ksel">নিচে নিজের নাম বাছুন</div>
+      <button id="kgo" disabled>—</button></div>
+    <div class="card" id="kstaff"></div>
+    <div class="card"><button class="sec" id="kexit">কিয়স্ক বন্ধ</button><pre id="kdbg" class="hidden"></pre></div>
+  </div>
+  <div class="hidden" id="main">
+    <div class="card">
+      <div class="muted" id="who"></div>
+      <div class="big" id="state">—</div>
+      <div class="muted" id="duty"></div>
+      <div class="muted" id="gps">লোকেশন: —</div>
+    </div>
+    <div class="card">
+      <video id="v" autoplay playsinline muted></video>
+      <button id="act" disabled>লোড হচ্ছে…</button>
+      <p id="msg"></p>
+      <button class="sec" id="logout">লগআউট</button>
+    </div>
+    <div class="card">
+      <details><summary>ভুল হয়েছে? সংশোধনের অনুরোধ</summary>
+        <label>কী যোগ হবে</label><select id="crType" style="width:100%;padding:12px;border-radius:10px"><option value="OUT">OUT</option><option value="IN">IN</option></select>
+        <label>সময়</label><input id="crTime" type="datetime-local">
+        <label>কারণ</label><input id="crReason" placeholder="যেমন: OUT দিতে ভুলে গেছি">
+        <button id="crSend">অনুরোধ পাঠান</button><p id="crMsg"></p>
+      </details>
+    </div>
+    <div class="card hidden" id="dbgCard"><pre id="dbg"></pre></div>
+  </div>
+</div>
+<script>
+(function () {
+  var FA_TAG = document.querySelector('script[data-faceapi]');
+  var MODEL = FA_TAG ? FA_TAG.getAttribute('data-model') : 'vendor/face-api/model';
+  var DEBUG = /[?&]debug=1\b/.test(location.search);           // timing panel only for measurement sessions
+  var MODEL_VERSION = 'faceapi-1.7.13-tiny';
+  var $ = function (id) { return document.getElementById(id); };
+  function get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+  function put(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} }
+  var S = { url: get('usm_exec'), token: get('usm_att_token'), me: null, pos: null, ready: false, mode: get('usm_mode'), kiosk: null, sel: null, kioskSetup: false };
+  if (DEBUG) { $('dbgCard').classList.remove('hidden'); $('kdbg').classList.remove('hidden'); }
+  function show(id) { ['cfg', 'login', 'main', 'kpick', 'kiosk'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); }); }
+  function uid() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/-/g, ''); }
+
+  function call(fn, args, write) {
+    var body = { fn: fn, args: args || {}, token: S.token || undefined, requestId: write ? uid() : undefined };
+    var t0 = performance.now();
+    return fetch(S.url, { method: 'POST', redirect: 'follow', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (DEBUG) ($(S.mode === 'KIOSK' ? 'kdbg' : 'dbg')).textContent = fn + ' · ' + Math.round(performance.now() - t0) + ' ms (server ' + (res.ms || '?') + ' ms)' +
+          (res.data && res.data.ms ? '\n' + JSON.stringify(res.data.ms) : '');
+        if (!res.ok) { var e = new Error(res.message || res.code); e.code = res.code; throw e; }
+        return res.data;
+      });
+  }
+
+  function watchGps() {
+    if (!navigator.geolocation) { $('gps').textContent = 'এই ফোনে GPS নেই'; return; }
+    navigator.geolocation.watchPosition(function (p) {
+      S.pos = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy) };
+      $('gps').textContent = 'লোকেশন পাওয়া গেছে (±' + S.pos.acc + ' m)';
+    }, function () { $('gps').textContent = 'লোকেশন বন্ধ — GPS চালু করুন'; }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
+  }
+
+  function startCamera() {
+    return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false }).then(function (st) { $('v').srcObject = st; });
+  }
+
+  function descriptor() {
+    var opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
+    return faceapi.detectSingleFace($('v'), opts).withFaceLandmarks().withFaceDescriptor().then(function (d) {
+      if (!d) throw new Error('মুখ পাওয়া যায়নি। ক্যামেরার দিকে সোজা তাকান।');
+      return Array.prototype.slice.call(d.descriptor);
+    });
+  }
+
+  function render() {
+    var m = S.me;
+    $('who').textContent = m.full_name + ' #' + m.employee_id + (m.branch ? ' · ' + m.branch.name : '');
+    $('state').textContent = m.last ? (m.last.event_type === 'IN' ? 'ভেতরে আছেন' : 'বেরিয়েছেন') + ' · ' + m.last.event_time.slice(11, 16) : 'আজ এখনো হাজিরা নেই';
+    var x = m.expected || {};
+    $('duty').textContent = 'কাজের তারিখ ' + m.work_date + ' · ডিউটি: ' + (x.kind === 'WORK' ? x.duty_code + ' ' + x.start + '–' + x.end : x.kind === 'OFF' ? 'অফ ডে' : 'রোস্টার নেই');
+    var b = $('act');
+    b.disabled = !S.ready;
+    b.textContent = !S.ready ? 'লোড হচ্ছে…' : !m.face_registered ? 'মুখ নিবন্ধন করুন' : m.next === 'IN' ? 'IN দিন' : 'OUT দিন';
+  }
+
+  function refresh() { return call('attendance.me').then(function (m) { S.me = m; render(); }); }
+
+  function msg(t, ok) { $('msg').textContent = t; $('msg').className = ok ? 'ok' : 'bad'; }
+
+  function act() {
+    var m = S.me, b = $('act'); b.disabled = true; msg('মুখ যাচাই হচ্ছে…', true);
+    var pos = S.pos || {};
+    var job;
+    if (!m.face_registered) {
+      var samples = [];
+      job = descriptor().then(function (d) { samples.push(d); return new Promise(function (r) { setTimeout(r, 700); }); })
+        .then(descriptor).then(function (d) { samples.push(d); return new Promise(function (r) { setTimeout(r, 700); }); })
+        .then(descriptor).then(function (d) { samples.push(d);
+          return call('face.registerSelf', { descriptors: samples, model_version: MODEL_VERSION, lat: pos.lat, lng: pos.lng }, true); })
+        .then(function () { msg('নিবন্ধন হয়েছে। এখন হাজিরা দিন।', true); });
+    } else {
+      var cid = uid();
+      job = descriptor().then(function (d) {
+        return call('attendance.self', { client_event_id: cid, descriptor: d, lat: pos.lat, lng: pos.lng, expect_type: m.next }, true);
+      }).then(function (r) {
+        msg((r.event.event_type === 'IN' ? 'IN সম্পন্ন ' : 'OUT সম্পন্ন ') + r.event.event_time.slice(11, 16) + (r.warnings && r.warnings.length ? ' · ' + r.warnings.join(', ') : ''), true);
+      });
+    }
+    job.catch(function (e) { msg(e.message || String(e)); }).then(refresh).catch(function () {}).then(function () { b.disabled = false; });
+  }
+
+  $('saveUrl').onclick = function () { S.url = $('url').value.trim(); put('usm_exec', S.url); boot(); };
+  function login(kioskSetup) {
+    call('auth.login', { username: $('u').value.trim(), password: $('p').value, device: kioskSetup ? 'WEB' : 'PHONE' }).then(function (d) {
+      if (d.user && d.user.mustChangePassword) throw new Error('প্রথমে মূল অ্যাপে পাসওয়ার্ড বদলান।');
+      $('p').value = ''; S.token = d.token;
+      if (!kioskSetup) { put('usm_att_token', d.token); boot(); return; }
+      return call('kiosk.branches').then(function (list) {
+        if (!list.length) throw new Error('আপনার কোনো শাখায় কিয়স্কের অনুমতি নেই।');
+        show('kpick');
+        $('kbranches').innerHTML = '';
+        list.forEach(function (b) {
+          var btn = document.createElement('button'); btn.textContent = b.branch_code + ' · ' + b.branch_name;
+          btn.onclick = function () {
+            call('kiosk.start', { branch_id: b.branch_id }, true).then(function (k) {
+              var mgr = S.token;
+              return call('auth.logout').catch(function () {}).then(function () {      // manager session leaves the device
+                void mgr; S.token = k.kiosk_token; S.mode = 'KIOSK'; put('usm_att_token', k.kiosk_token); put('usm_mode', 'KIOSK'); boot();
+              });
+            }).catch(function (e) { alert(e.message); });
+          };
+          $('kbranches').appendChild(btn);
+        });
+      });
+    }).catch(function (e) { $('lmsg').textContent = e.message; });
+  }
+  $('doLogin').onclick = function () { login(false); };
+  $('doKiosk').onclick = function () { login(true); };
+
+  /* ---------- kiosk ---------- */
+  function kmsg(t, ok) { $('kmsg').textContent = t; $('kmsg').className = ok ? 'ok' : 'bad'; }
+  function kload() {
+    return call('kiosk.staff').then(function (k) {
+      S.kiosk = k; $('kname').textContent = k.branch_name; $('kstaff').innerHTML = '';
+      k.staff.forEach(function (p) {
+        var b = document.createElement('button'); b.className = 'sec';
+        b.textContent = p.full_name + ' #' + p.employee_id + ' — ' + (p.face_registered ? (p.next === 'IN' ? 'IN দেবেন' : 'OUT দেবেন') : 'মুখ নিবন্ধন নেই');
+        b.disabled = !p.face_registered;
+        b.onclick = function () { S.sel = p; $('ksel').textContent = p.full_name + ' — ক্যামেরার দিকে তাকান'; $('kgo').disabled = !S.ready; $('kgo').textContent = 'যাচাই করে ' + p.next + ' দিন'; };
+        $('kstaff').appendChild(b);
+      });
+    });
+  }
+  $('kgo').onclick = function () {
+    var p = S.sel; if (!p) return; $('kgo').disabled = true; kmsg('মুখ যাচাই হচ্ছে…', true);
+    var opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
+    faceapi.detectSingleFace($('kv'), opts).withFaceLandmarks().withFaceDescriptor().then(function (d) {
+      if (!d) throw new Error('মুখ পাওয়া যায়নি।');
+      return call('kiosk.mark', { client_event_id: uid(), employee_id: p.employee_id, descriptor: Array.prototype.slice.call(d.descriptor), expect_type: p.next }, true);
+    }).then(function (r) { kmsg(p.full_name + ': ' + r.event.event_type + ' ' + r.event.event_time.slice(11, 16), true); })
+      .catch(function (e) { kmsg(e.message); })
+      .then(function () { S.sel = null; $('ksel').textContent = 'নিচে নিজের নাম বাছুন'; $('kgo').textContent = '—'; return kload(); }).catch(function () {});
+  };
+  $('kexit').onclick = function () {
+    if (!confirm('কিয়স্ক বন্ধ করবেন?')) return;
+    call('auth.logout').catch(function () {}).then(function () { S.token = ''; S.mode = ''; put('usm_att_token', ''); put('usm_mode', ''); boot(); });
+  };
+  $('logout').onclick = function () { call('auth.logout').catch(function () {}).then(function () { S.token = ''; put('usm_att_token', ''); boot(); }); };
+  $('act').onclick = act;
+  $('crSend').onclick = function () {
+    var t = $('crTime').value;
+    call('attendance.correctionRequest', { request_id: uid(), action: 'ADD', event_type: $('crType').value, event_time: t ? t.replace('T', ' ').slice(0, 16) : '', reason: $('crReason').value }, true)
+      .then(function (r) { $('crMsg').textContent = 'অনুরোধ পাঠানো হয়েছে (' + r.change_request.change_request_id + ') — ম্যানেজার অনুমোদন করবেন।'; $('crMsg').className = 'ok'; })
+      .catch(function (e) { $('crMsg').textContent = e.message; $('crMsg').className = 'bad'; });
+  };
+
+  function boot() {
+    if (!S.url) { show('cfg'); return; }
+    $('url').value = S.url;
+    if (!S.token) { show('login'); return; }
+    if (S.mode === 'KIOSK') {
+      show('kiosk');
+      kload().catch(function (e) { if (/AUTH/.test(e.code || '')) { S.token = ''; S.mode = ''; put('usm_att_token', ''); put('usm_mode', ''); show('login'); } else kmsg(e.message); });
+      if (typeof faceapi === 'undefined') { kmsg('মুখ শনাক্তকরণ লোড হয়নি — ইন্টারনেট দেখে পাতা আবার খুলুন।'); return; }
+      Promise.all([navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false }).then(function (st) { $('kv').srcObject = st; }),
+        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL), faceapi.nets.faceLandmark68Net.loadFromUri(MODEL), faceapi.nets.faceRecognitionNet.loadFromUri(MODEL)])
+        .then(function () { S.ready = true; }).catch(function (e) { kmsg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
+      return;
+    }
+    show('main'); watchGps();
+    refresh().catch(function (e) { if (/SESSION|AUTH/.test(e.code || '')) { S.token = ''; put('usm_att_token', ''); show('login'); } else msg(e.message); });
+    if (typeof faceapi === 'undefined') { msg('মুখ শনাক্তকরণ লোড হয়নি — ইন্টারনেট দেখে পাতা আবার খুলুন।'); return; }
+    Promise.all([startCamera(), faceapi.nets.tinyFaceDetector.loadFromUri(MODEL), faceapi.nets.faceLandmark68Net.loadFromUri(MODEL),
+                 faceapi.nets.faceRecognitionNet.loadFromUri(MODEL)])
+      .then(function () { S.ready = true; if (S.me) render(); })
+      .catch(function (e) { msg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
+  }
+  boot();
+})();
+</script>
+</body>
+</html>
