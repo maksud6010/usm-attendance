@@ -44,14 +44,24 @@
     <label>ইউজারনেম</label><input id="u" autocomplete="username">
     <label>পাসওয়ার্ড</label><input id="p" type="password" autocomplete="current-password">
     <button id="doLogin">লগইন</button>
-    <button class="sec" id="doKiosk">ম্যানেজার: এই ডিভাইসে কিয়স্ক চালু করুন</button>
+    <button class="sec" id="doKiosk">ম্যানেজার: এই ল্যাপটপ কিয়স্ক হিসেবে নিবন্ধন করুন</button>
     <p id="lmsg" class="bad"></p>
   </div>
+  <div class="card hidden" id="pwd">
+    <h1>নতুন পাসওয়ার্ড দিন</h1>
+    <p class="muted">প্রথম লগইন: HR-এর দেওয়া অস্থায়ী পাসওয়ার্ড বদলাতে হবে। কমপক্ষে ৮ অক্ষর, অক্ষর ও সংখ্যা দুটোই; কর্মী আইডি দিয়ে হবে না।</p>
+    <label for="np1">নতুন পাসওয়ার্ড</label><input id="np1" type="password" autocomplete="new-password">
+    <label for="np2">আবার লিখুন</label><input id="np2" type="password" autocomplete="new-password">
+    <button id="npSave">সংরক্ষণ</button><p id="npMsg" class="bad"></p>
+  </div>
   <div class="card hidden" id="kpick">
-    <h1>কিয়স্ক শাখা</h1><div id="kbranches"></div><p class="muted">কিয়স্ক চালু হলে এই ডিভাইস শুধু এই শাখার হাজিরা নেবে।</p>
+    <h1>কিয়স্ক নিবন্ধন</h1>
+    <label for="klabel">এই ল্যাপটপের নাম</label><input id="klabel" placeholder="যেমন: Uttara front desk">
+    <div id="kbranches"></div><p class="muted">নিবন্ধনের পর এই ল্যাপটপ শুধু নির্বাচিত শাখার হাজিরা নেবে; শাখা বদলাতে আবার অনুমোদিত নিবন্ধন লাগবে। আপনার লগইন এই ডিভাইসে থাকবে না।</p>
+    <p id="kpmsg" class="bad"></p>
   </div>
   <div class="hidden" id="kiosk">
-    <div class="card"><div class="muted">কিয়স্ক</div><div class="big" id="kname">—</div><p id="kmsg"></p></div>
+    <div class="card"><div class="muted">Registered Kiosk</div><div class="big" id="kname">—</div><div class="muted" id="klab"></div><p id="kmsg"></p></div>
     <div class="card"><video id="kv" autoplay playsinline muted></video><div class="muted" id="ksel">নিচে নিজের নাম বাছুন</div>
       <button id="kgo" disabled>—</button></div>
     <div class="card" id="kstaff"></div>
@@ -90,20 +100,26 @@
   var $ = function (id) { return document.getElementById(id); };
   function get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
   function put(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} }
+  function uid0() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + String(Math.random()).slice(2)).replace(/[^A-Za-z0-9]/g, ''); }
+  var DEV = get('usm_device_id'); if (!DEV) { DEV = uid0(); put('usm_device_id', DEV); }   // this phone/laptop; the server keeps only its hash
   var S = { url: get('usm_exec'), token: get('usm_att_token'), me: null, pos: null, ready: false, mode: get('usm_mode'), kiosk: null, sel: null, kioskSetup: false };
   if (DEBUG) { $('dbgCard').classList.remove('hidden'); $('kdbg').classList.remove('hidden'); }
-  function show(id) { ['cfg', 'login', 'main', 'kpick', 'kiosk'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); }); }
+  function show(id) { ['cfg', 'login', 'pwd', 'main', 'kpick', 'kiosk'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); }); }
   function uid() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/-/g, ''); }
 
+  var ERR_BN = { DEVICE_NOT_REGISTERED: 'এই অ্যাকাউন্ট অন্য একটি ফোনে নিবন্ধিত। HR-কে নিবন্ধিত ফোন রিসেট করতে বলুন।',
+    DEVICE_ID_REQUIRED: 'অ্যাপ পুরনো — পাতাটি আবার লোড করুন।',
+    DEVICE_IN_USE: 'এই ফোন অন্য একজন কর্মীর নামে নিবন্ধিত। এক ফোনে একজন — শাখার কিয়স্ক ব্যবহার করুন বা HR-কে বলুন।',
+    TEMP_PASSWORD_EXPIRED: 'অস্থায়ী পাসওয়ার্ডের মেয়াদ শেষ। HR-এর কাছ থেকে নতুন অস্থায়ী পাসওয়ার্ড নিন।', AUTH_FAILED: 'ইউজারনেম বা পাসওয়ার্ড ভুল।', PASSWORD_WEAK: 'পাসওয়ার্ড দুর্বল: কমপক্ষে ৮ অক্ষর, অক্ষর ও সংখ্যা; আইডি দিয়ে হবে না।' };
   function call(fn, args, write) {
-    var body = { fn: fn, args: args || {}, token: S.token || undefined, requestId: write ? uid() : undefined };
+    var body = { fn: fn, args: args || {}, token: S.token || undefined, requestId: write ? uid() : undefined, perf: DEBUG || undefined };
     var t0 = performance.now();
     return fetch(S.url, { method: 'POST', redirect: 'follow', credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); })
       .then(function (res) {
         if (DEBUG) ($(S.mode === 'KIOSK' ? 'kdbg' : 'dbg')).textContent = fn + ' · ' + Math.round(performance.now() - t0) + ' ms (server ' + (res.ms || '?') + ' ms)' +
-          (res.data && res.data.ms ? '\n' + JSON.stringify(res.data.ms) : '');
-        if (!res.ok) { var e = new Error(res.message || res.code); e.code = res.code; throw e; }
+          (res.data && res.data.ms ? '\n' + JSON.stringify(res.data.ms) : '') + (res.perf ? '\nreads ' + res.perf.reads + ' · cells ' + res.perf.cells + ' · read ' + res.perf.read_ms + ' ms · ' + (res.perf.repeated || []).join(',') : '');
+        if (!res.ok) { var e = new Error(ERR_BN[res.code] || res.message || res.code); e.code = res.code; throw e; }
         return res.data;
       });
   }
@@ -166,30 +182,45 @@
   }
 
   $('saveUrl').onclick = function () { S.url = $('url').value.trim(); put('usm_exec', S.url); boot(); };
+  var lastPwd = '';                                                       // kept in memory only for the first-login change
   function login(kioskSetup) {
-    call('auth.login', { username: $('u').value.trim(), password: $('p').value, device: kioskSetup ? 'WEB' : 'PHONE' }).then(function (d) {
-      if (d.user && d.user.mustChangePassword) throw new Error('প্রথমে মূল অ্যাপে পাসওয়ার্ড বদলান।');
-      $('p').value = ''; S.token = d.token;
+    $('lmsg').textContent = '';
+    var label = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '') + ' · ' + (screen.width + 'x' + screen.height);
+    call('auth.login', { username: $('u').value.trim(), password: $('p').value, device: kioskSetup ? 'WEB' : 'PHONE', device_id: kioskSetup ? undefined : DEV, device_label: label }).then(function (d) {
+      lastPwd = $('p').value; $('p').value = ''; S.token = d.token;
+      if (d.user && d.user.mustChangePassword) {
+        if (kioskSetup) { S.token = ''; throw new Error('প্রথমে মূল অ্যাপে পাসওয়ার্ড বদলান।'); }
+        put('usm_att_token', d.token); show('pwd'); return;
+      }
+      lastPwd = '';
       if (!kioskSetup) { put('usm_att_token', d.token); boot(); return; }
       return call('kiosk.branches').then(function (list) {
         if (!list.length) throw new Error('আপনার কোনো শাখায় কিয়স্কের অনুমতি নেই।');
         show('kpick');
         $('kbranches').innerHTML = '';
         list.forEach(function (b) {
-          var btn = document.createElement('button'); btn.textContent = b.branch_code + ' · ' + b.branch_name;
+          var btn = document.createElement('button'); btn.textContent = 'নিবন্ধন: ' + b.branch_code + ' · ' + b.branch_name;
           btn.onclick = function () {
-            call('kiosk.start', { branch_id: b.branch_id }, true).then(function (k) {
-              var mgr = S.token;
+            var lab = $('klabel').value.trim();
+            if (!lab) { $('kpmsg').textContent = 'ল্যাপটপের নাম লিখুন'; return; }
+            call('kiosk.register', { branch_id: b.branch_id, label: lab, device_id: DEV }, true).then(function (k) {
               return call('auth.logout').catch(function () {}).then(function () {      // manager session leaves the device
-                void mgr; S.token = k.kiosk_token; S.mode = 'KIOSK'; put('usm_att_token', k.kiosk_token); put('usm_mode', 'KIOSK'); boot();
+                S.token = k.device_token; S.mode = 'KIOSK'; put('usm_att_token', k.device_token); put('usm_mode', 'KIOSK'); boot();
               });
-            }).catch(function (e) { alert(e.message); });
+            }).catch(function (e) { $('kpmsg').textContent = e.message; });
           };
           $('kbranches').appendChild(btn);
         });
       });
     }).catch(function (e) { $('lmsg').textContent = e.message; });
   }
+  $('npSave').onclick = function () {
+    var a = $('np1').value, b = $('np2').value;
+    if (a !== b) { $('npMsg').textContent = 'দুটো পাসওয়ার্ড মেলেনি'; return; }
+    call('auth.changePassword', { oldPassword: lastPwd, newPassword: a }, true).then(function () {
+      lastPwd = ''; $('np1').value = ''; $('np2').value = ''; boot();
+    }).catch(function (e) { $('npMsg').textContent = e.message; });
+  };
   $('doLogin').onclick = function () { login(false); };
   $('doKiosk').onclick = function () { login(true); };
 
@@ -197,7 +228,7 @@
   function kmsg(t, ok) { $('kmsg').textContent = t; $('kmsg').className = ok ? 'ok' : 'bad'; }
   function kload() {
     return call('kiosk.staff').then(function (k) {
-      S.kiosk = k; $('kname').textContent = k.branch_name; $('kstaff').innerHTML = '';
+      S.kiosk = k; $('kname').textContent = 'Registered Kiosk · ' + k.branch_name; $('klab').textContent = k.kiosk_label || ''; $('kstaff').innerHTML = '';
       k.staff.forEach(function (p) {
         var b = document.createElement('button'); b.className = 'sec';
         b.textContent = p.full_name + ' #' + p.employee_id + ' — ' + (p.face_registered ? (p.next === 'IN' ? 'IN দেবেন' : 'OUT দেবেন') : 'মুখ নিবন্ধন নেই');
@@ -218,8 +249,8 @@
       .then(function () { S.sel = null; $('ksel').textContent = 'নিচে নিজের নাম বাছুন'; $('kgo').textContent = '—'; return kload(); }).catch(function () {});
   };
   $('kexit').onclick = function () {
-    if (!confirm('কিয়স্ক বন্ধ করবেন?')) return;
-    call('auth.logout').catch(function () {}).then(function () { S.token = ''; S.mode = ''; put('usm_att_token', ''); put('usm_mode', ''); boot(); });
+    if (!confirm('কিয়স্ক বন্ধ করবেন? এই ল্যাপটপের নিবন্ধন বাতিল হবে; আবার চালু করতে ম্যানেজারকে নিবন্ধন করতে হবে।')) return;
+    call('kiosk.release', {}, true).catch(function () {}).then(function () { S.token = ''; S.mode = ''; put('usm_att_token', ''); put('usm_mode', ''); boot(); });
   };
   $('logout').onclick = function () { call('auth.logout').catch(function () {}).then(function () { S.token = ''; put('usm_att_token', ''); boot(); }); };
   $('act').onclick = act;
@@ -236,7 +267,7 @@
     if (!S.token) { show('login'); return; }
     if (S.mode === 'KIOSK') {
       show('kiosk');
-      kload().catch(function (e) { if (/AUTH/.test(e.code || '')) { S.token = ''; S.mode = ''; put('usm_att_token', ''); put('usm_mode', ''); show('login'); } else kmsg(e.message); });
+      kload().catch(function (e) { if (/AUTH/.test(e.code || '')) { S.token = ''; S.mode = ''; put('usm_att_token', ''); put('usm_mode', ''); show('login'); $('lmsg').textContent = 'এই কিয়স্কের নিবন্ধন বাতিল হয়েছে — ম্যানেজার দিয়ে আবার নিবন্ধন করুন।'; } else kmsg(e.message); });
       if (typeof faceapi === 'undefined') { kmsg('মুখ শনাক্তকরণ লোড হয়নি — ইন্টারনেট দেখে পাতা আবার খুলুন।'); return; }
       Promise.all([navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false }).then(function (st) { $('kv').srcObject = st; }),
         faceapi.nets.tinyFaceDetector.loadFromUri(MODEL), faceapi.nets.faceLandmark68Net.loadFromUri(MODEL), faceapi.nets.faceRecognitionNet.loadFromUri(MODEL)])
@@ -244,7 +275,9 @@
       return;
     }
     show('main'); watchGps();
-    refresh().catch(function (e) { if (/SESSION|AUTH/.test(e.code || '')) { S.token = ''; put('usm_att_token', ''); show('login'); } else msg(e.message); });
+    refresh().catch(function (e) {
+      if (e.code === 'PASSWORD_CHANGE_REQUIRED') { S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = 'আবার লগইন করে নতুন পাসওয়ার্ড দিন।'; }
+      else if (/SESSION|AUTH|DEVICE/.test(e.code || '')) { S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = e.message; } else msg(e.message); });
     if (typeof faceapi === 'undefined') { msg('মুখ শনাক্তকরণ লোড হয়নি — ইন্টারনেট দেখে পাতা আবার খুলুন।'); return; }
     Promise.all([startCamera(), faceapi.nets.tinyFaceDetector.loadFromUri(MODEL), faceapi.nets.faceLandmark68Net.loadFromUri(MODEL),
                  faceapi.nets.faceRecognitionNet.loadFromUri(MODEL)])
