@@ -12,9 +12,11 @@
 -->
 <!-- Face library + models: SELF-HOSTED, pinned @vladmandic/face-api 1.7.13 (no live CDN in production).
      tools/vendor-face-api.sh builds vendor/face-api/ (face-api.js + tiny_face_detector, face_landmark_68, face_recognition);
-     upload that folder next to this page. The integrity hash pins the exact library version. -->
-<script data-faceapi data-version="1.7.13" src="vendor/face-api/face-api.js" data-model="vendor/face-api/model"
-        integrity="sha384-5SEinnOIOK1Nl6bzEIWwfXWMg4EaJhN2bXKgrjYC0Bq+fYNZHwhD3ntM92lTHnfL" crossorigin="anonymous"></script>
+     upload that folder AND usm-face-sw.js next to this page. The integrity hash pins the exact library version.
+     6.5c: the library is loaded without blocking the page (this tag is configuration only); usm-face-sw.js keeps
+     the library + models in a versioned local cache (usm-face-1.7.13-v1) so later opens do not download them. -->
+<script type="application/json" id="faceCfg" data-faceapi data-version="1.7.13" data-src="vendor/face-api/face-api.js" data-model="vendor/face-api/model"
+        data-integrity="sha384-5SEinnOIOK1Nl6bzEIWwfXWMg4EaJhN2bXKgrjYC0Bq+fYNZHwhD3ntM92lTHnfL" data-sw="usm-face-sw.js">{}</script>
 <style>
   :root { --bg:#f3f5f8; --card:#fff; --ink:#1b2430; --muted:#5d6b7a; --pri:#1e4e79; --ok:#1b7f4b; --bad:#b3261e; --line:#dde3ea; }
   @media (prefers-color-scheme: dark) { :root { --bg:#11161c; --card:#1a2129; --ink:#e7edf3; --muted:#9aa8b6; --pri:#6aa5d8; --ok:#5cc28c; --bad:#ff8a80; --line:#2a333d; } }
@@ -65,7 +67,7 @@
     <div class="card"><video id="kv" autoplay playsinline muted></video><div class="muted" id="ksel">নিচে নিজের নাম বাছুন</div>
       <button id="kgo" disabled>—</button></div>
     <div class="card" id="kstaff"></div>
-    <div class="card"><button class="sec" id="kexit">কিয়স্ক বন্ধ</button><pre id="kdbg" class="hidden"></pre></div>
+    <div class="card"><button class="sec" id="kexit">কিয়স্ক বন্ধ</button><pre id="kdbg" class="hidden"></pre><pre id="kdbgT" class="hidden"></pre></div>
   </div>
   <div class="hidden" id="main">
     <div class="card">
@@ -75,7 +77,7 @@
       <div class="muted" id="gps">লোকেশন: —</div>
     </div>
     <div class="card">
-      <video id="v" autoplay playsinline muted></video>
+      <video id="v" autoplay playsinline muted></video><div class="muted" id="fhint"></div>
       <button id="act" disabled>লোড হচ্ছে…</button>
       <p id="msg"></p>
       <button class="sec" id="logout">লগআউট</button>
@@ -88,14 +90,29 @@
         <button id="crSend">অনুরোধ পাঠান</button><p id="crMsg"></p>
       </details>
     </div>
-    <div class="card hidden" id="dbgCard"><pre id="dbg"></pre></div>
+    <div class="card hidden" id="dbgCard"><pre id="dbg"></pre><pre id="dbgT"></pre>
+      <button class="sec" id="benchBtn">ইনপুট সাইজ বেঞ্চমার্ক (160 / 224 / 320)</button><pre id="benchOut"></pre></div>
   </div>
 </div>
 <script>
 (function () {
-  var FA_TAG = document.querySelector('script[data-faceapi]');
+  var FA_TAG = document.querySelector('[data-faceapi]');
   var MODEL = FA_TAG ? FA_TAG.getAttribute('data-model') : 'vendor/face-api/model';
   var DEBUG = /[?&]debug=1\b/.test(location.search);           // timing panel only for measurement sessions
+  var FACE_INPUT = 320;                                          // detector input size (frozen unless phone benchmarks prove a smaller one equal)
+
+  /* ---------- 6.5c timing (shown with ?debug=1; window.__usmTiming for measurement) ---------- */
+  var TM = window.__usmTiming = { marks: {}, captures: { register: 0, mark: 0, kiosk: 0 }, backend: '' };
+  function tmark(k, ms) { TM.marks[k] = Math.round(ms); if (DEBUG) showTiming(); }
+  function showTiming() {
+    if (typeof $ !== 'function') return;                         // called before the helpers below are defined
+    var m = TM.marks, order = ['html', 'sw', 'lib', 'model_tiny', 'model_landmark', 'model_recognition', 'models_total', 'warmup', 'camera', 'me', 'ready',
+      'detect', 'descriptor', 'capture_total', 'api_roundtrip', 'api_server', 'mark_total'];
+    var txt = 'backend ' + (TM.backend || '?') + ' · input ' + FACE_INPUT + ' · captures ' + JSON.stringify(TM.captures) + '\n' +
+      order.filter(function (k) { return m[k] !== undefined; }).map(function (k) { return (k + '               ').slice(0, 18) + m[k] + ' ms'; }).join('\n');
+    var el = $(S && S.mode === 'KIOSK' ? 'kdbgT' : 'dbgT'); if (el) el.textContent = txt;
+  }
+  tmark('html', performance.now());
   var MODEL_VERSION = 'faceapi-1.7.13-tiny';
   var $ = function (id) { return document.getElementById(id); };
   function get(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
@@ -103,7 +120,7 @@
   function uid0() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + String(Math.random()).slice(2)).replace(/[^A-Za-z0-9]/g, ''); }
   var DEV = get('usm_device_id'); if (!DEV) { DEV = uid0(); put('usm_device_id', DEV); }   // this phone/laptop; the server keeps only its hash
   var S = { url: get('usm_exec'), token: get('usm_att_token'), me: null, pos: null, ready: false, mode: get('usm_mode'), kiosk: null, sel: null, kioskSetup: false };
-  if (DEBUG) { $('dbgCard').classList.remove('hidden'); $('kdbg').classList.remove('hidden'); }
+  if (DEBUG) { $('dbgCard').classList.remove('hidden'); $('kdbg').classList.remove('hidden'); $('kdbgT').classList.remove('hidden'); }
   function show(id) { ['cfg', 'login', 'pwd', 'main', 'kpick', 'kiosk'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); }); }
   function uid() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/-/g, ''); }
 
@@ -119,6 +136,7 @@
       .then(function (res) {
         if (DEBUG) ($(S.mode === 'KIOSK' ? 'kdbg' : 'dbg')).textContent = fn + ' · ' + Math.round(performance.now() - t0) + ' ms (server ' + (res.ms || '?') + ' ms)' +
           (res.data && res.data.ms ? '\n' + JSON.stringify(res.data.ms) : '') + (res.perf ? '\nreads ' + res.perf.reads + ' · cells ' + res.perf.cells + ' · read ' + res.perf.read_ms + ' ms · ' + (res.perf.repeated || []).join(',') : '');
+        if (fn === 'attendance.self' || fn === 'kiosk.mark') tmark('api_server', res.ms || 0);
         if (!res.ok) { var e = new Error(ERR_BN[res.code] || res.message || res.code); e.code = res.code; throw e; }
         return res.data;
       });
@@ -132,17 +150,113 @@
     }, function () { $('gps').textContent = 'লোকেশন বন্ধ — GPS চালু করুন'; }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
   }
 
-  function startCamera() {
-    return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false }).then(function (st) { $('v').srcObject = st; });
+  /* ---------- 6.5c face engine: one load per page, started at page open, warmed before the first tap ---------- */
+  var FACE = { p: null, ready: false };
+  function swReady() {                                           // versioned asset cache; never caches API calls or descriptors
+    var t0 = performance.now(), url = FA_TAG && FA_TAG.getAttribute('data-sw');
+    if (!url || !('serviceWorker' in navigator)) return Promise.resolve();
+    return navigator.serviceWorker.register(url).then(function () {
+      if (navigator.serviceWorker.controller) return;
+      return new Promise(function (r) { navigator.serviceWorker.addEventListener('controllerchange', r); setTimeout(r, 1500); });
+    }).catch(function () {}).then(function () { tmark('sw', performance.now() - t0); });
   }
-
-  function descriptor() {
-    var opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
-    return faceapi.detectSingleFace($('v'), opts).withFaceLandmarks().withFaceDescriptor().then(function (d) {
-      if (!d) throw new Error('মুখ পাওয়া যায়নি। ক্যামেরার দিকে সোজা তাকান।');
-      return Array.prototype.slice.call(d.descriptor);
+  function loadLib() {
+    if (window.faceapi) return Promise.resolve();
+    var t0 = performance.now();
+    return new Promise(function (resolve, reject) {
+      var sc = document.createElement('script');
+      sc.src = FA_TAG.getAttribute('data-src'); sc.integrity = FA_TAG.getAttribute('data-integrity'); sc.crossOrigin = 'anonymous'; sc.async = true;
+      sc.onload = function () { tmark('lib', performance.now() - t0); resolve(); };
+      sc.onerror = function () { reject(new Error('মুখ শনাক্তকরণ লাইব্রেরি লোড হয়নি — ইন্টারনেট দেখে পাতা আবার খুলুন।')); };
+      document.head.appendChild(sc);
     });
   }
+  function timedLoad(net, key) { var t0 = performance.now(); return net.loadFromUri(MODEL).then(function () { tmark(key, performance.now() - t0); }); }
+  /** Compile/upload every network once on a blank input (no face, nothing kept or sent) so the first real tap is fast. */
+  function warmup() {
+    var t0 = performance.now(), c = document.createElement('canvas'); c.width = 150; c.height = 150;
+    var c2 = document.createElement('canvas'); c2.width = FACE_INPUT; c2.height = FACE_INPUT;
+    return faceapi.nets.tinyFaceDetector.locateFaces(c2, new faceapi.TinyFaceDetectorOptions({ inputSize: FACE_INPUT, scoreThreshold: 0.5 }))
+      .then(function () { return faceapi.nets.faceLandmark68Net.detectLandmarks(c); })
+      .then(function () { return faceapi.nets.faceRecognitionNet.computeFaceDescriptor(c); })
+      .then(function () { tmark('warmup', performance.now() - t0); });
+  }
+  function faceInit() {
+    if (FACE.p) return FACE.p;
+    var t0 = performance.now();
+    FACE.p = swReady().then(loadLib).then(function () {
+      return faceapi.tf && faceapi.tf.ready ? faceapi.tf.ready().then(function () { TM.backend = faceapi.tf.getBackend(); }) : null;
+    }).then(function () {
+      return Promise.all([timedLoad(faceapi.nets.tinyFaceDetector, 'model_tiny'), timedLoad(faceapi.nets.faceLandmark68Net, 'model_landmark'),
+                          timedLoad(faceapi.nets.faceRecognitionNet, 'model_recognition')]);
+    }).then(function () { tmark('models_total', performance.now() - t0); return warmup(); })
+      .then(function () { FACE.ready = true; });
+    FACE.p.catch(function () { FACE.p = null; });                 // allow a retry after a network error
+    return FACE.p;
+  }
+  var CAM = {};
+  function startCamera(id) {
+    if (CAM[id]) return CAM[id];
+    var t0 = performance.now();
+    CAM[id] = navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false }).then(function (st) {
+      $(id).srcObject = st;
+      return new Promise(function (r) { if ($(id).readyState >= 2) r(); else $(id).onloadeddata = function () { r(); }; });
+    }).then(function () { tmark('camera', performance.now() - t0); });
+    CAM[id].catch(function () { CAM[id] = null; });
+    return CAM[id];
+  }
+  /** One live descriptor from the camera (detector → landmarks → descriptor). kind = register | mark | kiosk. */
+  function capture(videoId, kind) {
+    var t0 = performance.now(), v = $(videoId), opts = new faceapi.TinyFaceDetectorOptions({ inputSize: FACE_INPUT, scoreThreshold: 0.5 });
+    TM.captures[kind]++;
+    var pre = DEBUG ? faceapi.detectSingleFace(v, opts).then(function () { tmark('detect', performance.now() - t0); }) : Promise.resolve();
+    return pre.then(function () {
+      var t1 = performance.now();
+      return faceapi.detectSingleFace(v, opts).withFaceLandmarks().withFaceDescriptor().then(function (d) {
+        tmark('descriptor', performance.now() - t1); tmark('capture_total', performance.now() - t0);
+        if (!d) throw new Error('মুখ পাওয়া যায়নি। ক্যামেরার দিকে সোজা তাকান।');
+        return Array.prototype.slice.call(d.descriptor);
+      });
+    });
+  }
+  function descriptor() { return capture('v', 'register'); }
+  /** Debug: detector input size benchmark on this phone's live camera (nothing sent). */
+  function bench() {
+    var sizes = [160, 224, 320], out = [], ref = null, v = $('v');
+    function dist(a, b) { var s = 0; for (var i = 0; i < a.length; i++) s += (a[i] - b[i]) * (a[i] - b[i]); return Math.sqrt(s); }
+    function one(size, n) {
+      var t0 = performance.now();
+      return faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: size, scoreThreshold: 0.5 })).withFaceLandmarks().withFaceDescriptor()
+        .then(function (d) { return { ms: performance.now() - t0, d: d ? Array.prototype.slice.call(d.descriptor) : null }; });
+    }
+    var chain = Promise.resolve();
+    sizes.slice().reverse().forEach(function (size) {
+      chain = chain.then(function () {
+        var rs = []; var c2 = one(size);                                  // untimed first run per size (shader compile for the new shape)
+        [0, 1, 2].forEach(function () { c2 = c2.then(function () { return one(size).then(function (r) { rs.push(r); }); }); });
+        return c2.then(function () {
+          var found = rs.filter(function (r) { return r.d; });
+          if (size === 320 && found.length) ref = found[0].d;
+          out.push(size + ': ' + Math.round(rs.reduce(function (n, r) { return n + r.ms; }, 0) / rs.length) + ' ms avg · found ' + found.length + '/3' +
+            (ref && found.length ? ' · distance to 320 ' + dist(found[0].d, ref).toFixed(3) : ''));
+          $('benchOut').textContent = out.join('\n');
+        });
+      });
+    });
+    return chain;
+  }
+  var loopOn = false;
+  /** Light detector-only loop (≈1 s) while the screen is open: keeps the detector hot and tells the user a face is in view. */
+  function hintLoop() {
+    if (loopOn) return; loopOn = true;
+    (function tick() {
+      if (!FACE.ready || document.hidden || busy || $('main').classList.contains('hidden')) { setTimeout(tick, 1000); return; }
+      faceapi.detectSingleFace($('v'), new faceapi.TinyFaceDetectorOptions({ inputSize: FACE_INPUT, scoreThreshold: 0.5 })).then(function (d) {
+        $('fhint').textContent = d ? 'মুখ পাওয়া গেছে ✓' : 'ক্যামেরার দিকে সোজা তাকান';
+      }).catch(function () {}).then(function () { setTimeout(tick, 1000); });
+    })();
+  }
+  var busy = false;
 
   function render() {
     var m = S.me;
@@ -151,16 +265,18 @@
     var x = m.expected || {};
     $('duty').textContent = 'কাজের তারিখ ' + m.work_date + ' · ডিউটি: ' + (x.kind === 'WORK' ? x.duty_code + ' ' + x.start + '–' + x.end : x.kind === 'OFF' ? 'অফ ডে' : 'রোস্টার নেই');
     var b = $('act');
-    b.disabled = !S.ready;
+    b.disabled = !S.ready || busy;
     b.textContent = !S.ready ? 'লোড হচ্ছে…' : !m.face_registered ? 'মুখ নিবন্ধন করুন' : m.next === 'IN' ? 'IN দিন' : 'OUT দিন';
+    if (S.ready && !TM.marks.ready) tmark('ready', performance.now());
   }
 
-  function refresh() { return call('attendance.me').then(function (m) { S.me = m; render(); }); }
+  function refresh() { var t0 = performance.now(); return call('attendance.me').then(function (m) { if (!TM.marks.me) tmark('me', performance.now() - t0); S.me = m; render(); }); }
 
   function msg(t, ok) { $('msg').textContent = t; $('msg').className = ok ? 'ok' : 'bad'; }
 
   function act() {
-    var m = S.me, b = $('act'); b.disabled = true; msg('মুখ যাচাই হচ্ছে…', true);
+    var m = S.me, b = $('act'); b.disabled = true; busy = true; msg('মুখ যাচাই হচ্ছে…', true);
+    var tAct = performance.now();
     var pos = S.pos || {};
     var job;
     if (!m.face_registered) {
@@ -172,13 +288,15 @@
         .then(function () { msg('নিবন্ধন হয়েছে। এখন হাজিরা দিন।', true); });
     } else {
       var cid = uid();
-      job = descriptor().then(function (d) {
-        return call('attendance.self', { client_event_id: cid, descriptor: d, lat: pos.lat, lng: pos.lng, expect_type: m.next }, true);
+      job = capture('v', 'mark').then(function (d) {                // ordinary IN/OUT: exactly one live capture
+        var tA = performance.now();
+        return call('attendance.self', { client_event_id: cid, descriptor: d, lat: pos.lat, lng: pos.lng, expect_type: m.next }, true).then(function (r) {
+          tmark('api_roundtrip', performance.now() - tA); tmark('mark_total', performance.now() - tAct); return r; });
       }).then(function (r) {
         msg((r.event.event_type === 'IN' ? 'IN সম্পন্ন ' : 'OUT সম্পন্ন ') + r.event.event_time.slice(11, 16) + (r.warnings && r.warnings.length ? ' · ' + r.warnings.join(', ') : ''), true);
       });
     }
-    job.catch(function (e) { msg(e.message || String(e)); }).then(refresh).catch(function () {}).then(function () { b.disabled = false; });
+    job.catch(function (e) { msg(e.message || String(e)); }).then(function () { busy = false; return refresh(); }).catch(function () {}).then(function () { busy = false; render(); });
   }
 
   $('saveUrl').onclick = function () { S.url = $('url').value.trim(); put('usm_exec', S.url); boot(); };
@@ -251,10 +369,11 @@
   }
   $('kgo').onclick = function () {
     var p = S.sel; if (!p) return; $('kgo').disabled = true; kmsg('মুখ যাচাই হচ্ছে…', true);
-    var opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
-    faceapi.detectSingleFace($('kv'), opts).withFaceLandmarks().withFaceDescriptor().then(function (d) {
-      if (!d) throw new Error('মুখ পাওয়া যায়নি।');
-      return call('kiosk.mark', { client_event_id: uid(), employee_id: p.employee_id, descriptor: Array.prototype.slice.call(d.descriptor), expect_type: p.next }, true);
+    var tAct = performance.now();
+    capture('kv', 'kiosk').then(function (d) {
+      var tA = performance.now();
+      return call('kiosk.mark', { client_event_id: uid(), employee_id: p.employee_id, descriptor: d, expect_type: p.next }, true)
+        .then(function (r) { tmark('api_roundtrip', performance.now() - tA); tmark('mark_total', performance.now() - tAct); return r; });
     }).then(function (r) { kmsg(p.full_name + ': ' + r.event.event_type + ' ' + r.event.event_time.slice(11, 16), true); })
       .catch(function (e) { kmsg(e.message); })
       .then(function () { S.sel = null; $('ksel').textContent = 'নিচে নিজের নাম বাছুন'; $('kgo').textContent = '—'; return kload(); }).catch(function () {});
@@ -274,27 +393,25 @@
 
   function boot() {
     if (!S.url) { show('cfg'); return; }
+    faceInit().catch(function () {});                                   // library/models/warm-up start now — also while the user types the login
     $('url').value = S.url;
     if (!S.token) { show('login'); return; }
     if (S.mode === 'KIOSK') {
       show('kiosk');
       kload().catch(function (e) { if (/AUTH/.test(e.code || '')) { S.token = ''; S.mode = ''; put('usm_att_token', ''); put('usm_mode', ''); show('login'); $('lmsg').textContent = 'এই কিয়স্কের নিবন্ধন বাতিল হয়েছে — ম্যানেজার দিয়ে আবার নিবন্ধন করুন।'; } else kmsg(e.message); });
-      if (typeof faceapi === 'undefined') { kmsg('মুখ শনাক্তকরণ লোড হয়নি — ইন্টারনেট দেখে পাতা আবার খুলুন।'); return; }
-      Promise.all([navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false }).then(function (st) { $('kv').srcObject = st; }),
-        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL), faceapi.nets.faceLandmark68Net.loadFromUri(MODEL), faceapi.nets.faceRecognitionNet.loadFromUri(MODEL)])
-        .then(function () { S.ready = true; }).catch(function (e) { kmsg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
+      Promise.all([startCamera('kv'), faceInit()])                    // camera + models (+ warm-up) in parallel with the staff list
+        .then(function () { S.ready = true; tmark('ready', performance.now()); if (S.sel) $('kgo').disabled = false; }).catch(function (e) { kmsg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
       return;
     }
     show('main'); watchGps();
     refresh().catch(function (e) {
       if (e.code === 'PASSWORD_CHANGE_REQUIRED') { S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = 'আবার লগইন করে নতুন পাসওয়ার্ড দিন।'; }
       else if (/SESSION|AUTH|DEVICE/.test(e.code || '')) { S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = e.message; } else msg(e.message); });
-    if (typeof faceapi === 'undefined') { msg('মুখ শনাক্তকরণ লোড হয়নি — ইন্টারনেট দেখে পাতা আবার খুলুন।'); return; }
-    Promise.all([startCamera(), faceapi.nets.tinyFaceDetector.loadFromUri(MODEL), faceapi.nets.faceLandmark68Net.loadFromUri(MODEL),
-                 faceapi.nets.faceRecognitionNet.loadFromUri(MODEL)])
-      .then(function () { S.ready = true; if (S.me) render(); })
+    Promise.all([startCamera('v'), faceInit()])                       // camera + models (+ warm-up) in parallel with attendance.me
+      .then(function () { S.ready = true; if (S.me) render(); hintLoop(); })
       .catch(function (e) { msg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
   }
+  $('benchBtn').onclick = function () { if (FACE.ready) bench(); };
   boot();
 })();
 </script>
