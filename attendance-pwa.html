@@ -183,11 +183,17 @@
 
   $('saveUrl').onclick = function () { S.url = $('url').value.trim(); put('usm_exec', S.url); boot(); };
   var lastPwd = '';                                                       // kept in memory only for the first-login change
+  var loginBusy = false;
+  function setLoginBusy(b) { loginBusy = b; $('doLogin').disabled = b; $('doKiosk').disabled = b; }
   function login(kioskSetup) {
+    if (loginBusy) return;                                                 // a second tap must not start a second login
     $('lmsg').textContent = '';
     var label = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '') + ' · ' + (screen.width + 'x' + screen.height);
-    call('auth.login', { username: $('u').value.trim(), password: $('p').value, device: kioskSetup ? 'WEB' : 'PHONE', device_id: kioskSetup ? undefined : DEV, device_label: label }).then(function (d) {
-      lastPwd = $('p').value; $('p').value = ''; S.token = d.token;
+    var pwd = $('p').value;                                                // the password actually sent — captured at tap time
+    setLoginBusy(true);
+    call('auth.login', { username: $('u').value.trim(), password: pwd, device: kioskSetup ? 'WEB' : 'PHONE', device_id: kioskSetup ? undefined : DEV, device_label: label }).then(function (d) {
+      setLoginBusy(false);
+      lastPwd = pwd; $('p').value = ''; S.token = d.token;
       if (d.user && d.user.mustChangePassword) {
         if (kioskSetup) { S.token = ''; throw new Error('প্রথমে মূল অ্যাপে পাসওয়ার্ড বদলান।'); }
         put('usm_att_token', d.token); show('pwd'); return;
@@ -212,14 +218,19 @@
           $('kbranches').appendChild(btn);
         });
       });
-    }).catch(function (e) { $('lmsg').textContent = e.message; });
+    }).catch(function (e) { setLoginBusy(false); $('lmsg').textContent = e.message; });
   }
   $('npSave').onclick = function () {
-    var a = $('np1').value, b = $('np2').value;
+    var a = $('np1').value, b = $('np2').value, btn = $('npSave');
+    $('npMsg').textContent = '';
     if (a !== b) { $('npMsg').textContent = 'দুটো পাসওয়ার্ড মেলেনি'; return; }
+    if (!lastPwd) {                                                        // page was reloaded: the temporary password is not in memory
+      S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = 'আবার লগইন করে নতুন পাসওয়ার্ড দিন।'; return;
+    }
+    btn.disabled = true;
     call('auth.changePassword', { oldPassword: lastPwd, newPassword: a }, true).then(function () {
-      lastPwd = ''; $('np1').value = ''; $('np2').value = ''; boot();
-    }).catch(function (e) { $('npMsg').textContent = e.message; });
+      btn.disabled = false; lastPwd = ''; $('np1').value = ''; $('np2').value = ''; boot();      // same token, same phone binding
+    }).catch(function (e) { btn.disabled = false; $('npMsg').textContent = e.code === 'AUTH_FAILED' ? 'অস্থায়ী পাসওয়ার্ড মেলেনি — আবার লগইন করুন।' : e.message; });
   };
   $('doLogin').onclick = function () { login(false); };
   $('doKiosk').onclick = function () { login(true); };
