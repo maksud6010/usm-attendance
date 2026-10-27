@@ -99,7 +99,7 @@
   var FA_TAG = document.querySelector('[data-faceapi]');
   var MODEL = FA_TAG ? FA_TAG.getAttribute('data-model') : 'vendor/face-api/model';
   var DEBUG = /[?&]debug=1\b/.test(location.search);           // timing panel only for measurement sessions
-  var FACE_INPUT = 320;                                          // detector input size (frozen unless phone benchmarks prove a smaller one equal)
+  var FACE_INPUT = 224;                                          // fast path for ordinary IN/OUT; registration keeps 320; 224 falls back to 320 if no face
 
   /* ---------- 6.5c timing (shown with ?debug=1; window.__usmTiming for measurement) ---------- */
   var TM = window.__usmTiming = { marks: {}, captures: { register: 0, mark: 0, kiosk: 0 }, backend: '' };
@@ -107,7 +107,7 @@
   function showTiming() {
     if (typeof $ !== 'function') return;                         // called before the helpers below are defined
     var m = TM.marks, order = ['html', 'sw', 'lib', 'model_tiny', 'model_landmark', 'model_recognition', 'models_total', 'warmup', 'camera', 'me', 'ready',
-      'detect', 'descriptor', 'capture_total', 'api_roundtrip', 'api_server', 'mark_total'];
+      'detect', 'descriptor', 'capture_total', 'pre_capture', 'pre_used_age', 'api_roundtrip', 'api_server', 'mark_total'];
     var txt = 'backend ' + (TM.backend || '?') + ' · input ' + FACE_INPUT + ' · captures ' + JSON.stringify(TM.captures) + '\n' +
       order.filter(function (k) { return m[k] !== undefined; }).map(function (k) { return (k + '               ').slice(0, 18) + m[k] + ' ms'; }).join('\n');
     var el = $(S && S.mode === 'KIOSK' ? 'kdbgT' : 'dbgT'); if (el) el.textContent = txt;
@@ -119,7 +119,7 @@
   function put(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} }
   function uid0() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + String(Math.random()).slice(2)).replace(/[^A-Za-z0-9]/g, ''); }
   var DEV = get('usm_device_id'); if (!DEV) { DEV = uid0(); put('usm_device_id', DEV); }   // this phone/laptop; the server keeps only its hash
-  var S = { url: get('usm_exec'), token: get('usm_att_token'), me: null, pos: null, ready: false, mode: get('usm_mode'), kiosk: null, sel: null, kioskSetup: false };
+  var S = { url: get('usm_exec'), token: get('usm_att_token'), me: null, pos: null, ready: false, mode: get('usm_mode'), kiosk: null, sel: null, kioskSetup: false, faceRef: null, preFace: null, preFaceP: null, preFaceTimer: null };
   if (DEBUG) { $('dbgCard').classList.remove('hidden'); $('kdbg').classList.remove('hidden'); $('kdbgT').classList.remove('hidden'); }
   function show(id) { ['cfg', 'login', 'pwd', 'main', 'kpick', 'kiosk'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); }); }
   function uid() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/-/g, ''); }
@@ -155,10 +155,8 @@
   function swReady() {                                           // versioned asset cache; never caches API calls or descriptors
     var t0 = performance.now(), url = FA_TAG && FA_TAG.getAttribute('data-sw');
     if (!url || !('serviceWorker' in navigator)) return Promise.resolve();
-    return navigator.serviceWorker.register(url).then(function () {
-      if (navigator.serviceWorker.controller) return;
-      return new Promise(function (r) { navigator.serviceWorker.addEventListener('controllerchange', r); setTimeout(r, 1500); });
-    }).catch(function () {}).then(function () { tmark('sw', performance.now() - t0); });
+    // Registration must never block face startup. The browser HTTP cache serves this visit; the SW owns later visits.
+    return navigator.serviceWorker.register(url).catch(function () {}).then(function () { tmark('sw', performance.now() - t0); });
   }
   function loadLib() {
     if (window.faceapi) return Promise.resolve();
@@ -205,18 +203,25 @@
     CAM[id].catch(function () { CAM[id] = null; });
     return CAM[id];
   }
-  /** One live descriptor from the camera (detector → landmarks → descriptor). kind = register | mark | kiosk. */
+  /** One live descriptor from the camera (detector → landmarks → descriptor).
+   *  Ordinary IN/OUT uses 224 for speed and retries once at 320 only when no face is found.
+   *  Initial registration always uses 320 for the best template quality. Nothing is persisted locally. */
   function capture(videoId, kind) {
-    var t0 = performance.now(), v = $(videoId), opts = new faceapi.TinyFaceDetectorOptions({ inputSize: FACE_INPUT, scoreThreshold: 0.5 });
+    var t0 = performance.now(), v = $(videoId), firstSize = kind === 'register' ? 320 : FACE_INPUT;
     TM.captures[kind]++;
-    var pre = DEBUG ? faceapi.detectSingleFace(v, opts).then(function () { tmark('detect', performance.now() - t0); }) : Promise.resolve();
-    return pre.then(function () {
-      var t1 = performance.now();
+    function one(size) {
+      var t1 = performance.now(), opts = new faceapi.TinyFaceDetectorOptions({ inputSize: size, scoreThreshold: 0.5 });
       return faceapi.detectSingleFace(v, opts).withFaceLandmarks().withFaceDescriptor().then(function (d) {
-        tmark('descriptor', performance.now() - t1); tmark('capture_total', performance.now() - t0);
-        if (!d) throw new Error('মুখ পাওয়া যায়নি। ক্যামেরার দিকে সোজা তাকান।');
-        return Array.prototype.slice.call(d.descriptor);
+        tmark('descriptor', performance.now() - t1);
+        if (d) return d;
+        if (size !== 320) return one(320);
+        return null;
       });
+    }
+    return one(firstSize).then(function (d) {
+      tmark('capture_total', performance.now() - t0);
+      if (!d) throw new Error('মুখ পাওয়া যায়নি। ক্যামেরার দিকে সোজা তাকান।');
+      return Array.prototype.slice.call(d.descriptor);
     });
   }
   function descriptor() { return capture('v', 'register'); }
@@ -245,16 +250,74 @@
     });
     return chain;
   }
-  var loopOn = false;
-  /** Light detector-only loop (≈1 s) while the screen is open: keeps the detector hot and tells the user a face is in view. */
-  function hintLoop() {
-    if (loopOn) return; loopOn = true;
-    (function tick() {
-      if (!FACE.ready || document.hidden || busy || $('main').classList.contains('hidden')) { setTimeout(tick, 1000); return; }
-      faceapi.detectSingleFace($('v'), new faceapi.TinyFaceDetectorOptions({ inputSize: FACE_INPUT, scoreThreshold: 0.5 })).then(function (d) {
-        $('fhint').textContent = d ? 'মুখ পাওয়া গেছে ✓' : 'ক্যামেরার দিকে সোজা তাকান';
-      }).catch(function () {}).then(function () { setTimeout(tick, 1000); });
-    })();
+  /* ---------- 6.5d secure local face cache + one-shot pre-capture ----------
+   * Reference cache: encrypted centroid only, stored in IndexedDB with a non-extractable AES-GCM key.
+   * Live descriptor: RAM only, short lived; never written to storage. Final approval always happens on the server. */
+  var FACE_DB = 'usm-face-private-v1', PRE_FACE_MS = 5000, LOCAL_HINT_LIMIT = 0.82;
+  function idbOpen() {
+    return new Promise(function (resolve, reject) {
+      if (!window.indexedDB || !window.crypto || !crypto.subtle) return reject(new Error('secure cache unavailable'));
+      var q = indexedDB.open(FACE_DB, 1);
+      q.onupgradeneeded = function () { var db = q.result; if (!db.objectStoreNames.contains('keys')) db.createObjectStore('keys'); if (!db.objectStoreNames.contains('data')) db.createObjectStore('data'); };
+      q.onsuccess = function () { resolve(q.result); }; q.onerror = function () { reject(q.error); };
+    });
+  }
+  function idbGet(store, key) { return idbOpen().then(function (db) { return new Promise(function (resolve, reject) { var q = db.transaction(store, 'readonly').objectStore(store).get(key); q.onsuccess = function () { resolve(q.result); }; q.onerror = function () { reject(q.error); }; }); }); }
+  function idbPut(store, key, val) { return idbOpen().then(function (db) { return new Promise(function (resolve, reject) { var tx = db.transaction(store, 'readwrite'); tx.objectStore(store).put(val, key); tx.oncomplete = function () { resolve(); }; tx.onerror = function () { reject(tx.error); }; }); }); }
+  function faceKey() {
+    return idbGet('keys', 'aes').then(function (k) { if (k) return k; return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']).then(function (key) { return idbPut('keys', 'aes', key).then(function () { return key; }); }); });
+  }
+  function b64(a) { var u = new Uint8Array(a), x = ''; for (var i = 0; i < u.length; i++) x += String.fromCharCode(u[i]); return btoa(x); }
+  function unb64(s) { var x = atob(s), u = new Uint8Array(x.length); for (var i = 0; i < x.length; i++) u[i] = x.charCodeAt(i); return u; }
+  function cacheFaceRef(ref) {
+    if (!ref || !ref.employee_id || !ref.centroid || ref.centroid.length !== 128) return Promise.resolve();
+    var iv = crypto.getRandomValues(new Uint8Array(12)), plain = new TextEncoder().encode(JSON.stringify(ref));
+    return faceKey().then(function (key) { return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, plain); })
+      .then(function (ct) { return idbPut('data', 'emp:' + ref.employee_id, { iv: b64(iv), ct: b64(ct), version: ref.cache_version, model: ref.model_version }); })
+      .catch(function () {});
+  }
+  function loadFaceRef(empId, version) {
+    return idbGet('data', 'emp:' + empId).then(function (rec) {
+      if (!rec || rec.version !== version) return null;
+      return faceKey().then(function (key) { return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(rec.iv) }, key, unb64(rec.ct)); })
+        .then(function (pt) { var ref = JSON.parse(new TextDecoder().decode(pt)); return ref && ref.centroid && ref.centroid.length === 128 ? ref : null; });
+    }).catch(function () { return null; });
+  }
+  function localDist(a, b) { if (!a || !b || a.length !== b.length) return null; var x = 0; for (var i = 0; i < a.length; i++) { var d = a[i] - b[i]; x += d * d; } return Math.sqrt(x); }
+  function setFaceHint(text, ok) { var e = $('fhint'); if (!e) return; e.textContent = text; e.className = ok === true ? 'ok' : ok === false ? 'bad' : 'muted'; }
+  function ensureFaceRef() {
+    var m = S.me; if (!m || !m.face_registered) return Promise.resolve(null);
+    if (S.faceRef && S.faceRef.cache_version === m.face_cache_version) return Promise.resolve(S.faceRef);
+    return loadFaceRef(m.employee_id, m.face_cache_version).then(function (ref) {
+      if (ref) { S.faceRef = ref; return ref; }
+      return call('face.selfCacheTemplate').then(function (fresh) { S.faceRef = fresh; return cacheFaceRef(fresh).then(function () { return fresh; }); });
+    }).catch(function () { return null; });
+  }
+  function clearPreFace() { S.preFace = null; if (S.preFaceTimer) clearTimeout(S.preFaceTimer); S.preFaceTimer = null; }
+  function freshPreFace() { return S.preFace && (Date.now() - S.preFace.at <= PRE_FACE_MS) ? S.preFace : null; }
+  function primeFace() {
+    var m = S.me;
+    if (!S.ready || busy || !m || !m.face_registered || S.mode === 'KIOSK') return Promise.resolve(null);
+    if (freshPreFace()) return Promise.resolve(S.preFace);
+    if (S.preFaceP) return S.preFaceP;
+    setFaceHint('মুখ প্রস্তুত হচ্ছে…', null);
+    var t0 = performance.now();
+    S.preFaceP = Promise.all([ensureFaceRef(), capture('v', 'mark')]).then(function (x) {
+      var ref = x[0], d = x[1], dist = ref ? localDist(ref.centroid, d) : null;
+      S.preFace = { descriptor: d, at: Date.now(), local_distance: dist };
+      tmark('pre_capture', performance.now() - t0);
+      if (dist !== null && dist > LOCAL_HINT_LIMIT) setFaceHint('মুখ পরিষ্কার নয় — সোজা তাকান', false);
+      else setFaceHint('✓ মুখ প্রস্তুত — এখন ' + (m.next === 'IN' ? 'IN' : 'OUT') + ' দিন', true);
+      S.preFaceTimer = setTimeout(function () { if (S.preFace && Date.now() - S.preFace.at >= PRE_FACE_MS) { S.preFace = null; setFaceHint('মুখ সোজা রেখে ' + (S.me && S.me.next === 'OUT' ? 'OUT' : 'IN') + ' চাপুন', null); } }, PRE_FACE_MS + 100);
+      return S.preFace;
+    }).catch(function () { setFaceHint('মুখ ক্যামেরার মাঝে রাখুন', null); return null; }).then(function (x) { S.preFaceP = null; return x; });
+    return S.preFaceP;
+  }
+  function getFastDescriptor() {
+    var p = freshPreFace();
+    if (p) { tmark('pre_used_age', Date.now() - p.at); clearPreFace(); return Promise.resolve(p.descriptor); }
+    if (S.preFaceP) return S.preFaceP.then(function (x) { if (x && Date.now() - x.at <= PRE_FACE_MS) { var d = x.descriptor; clearPreFace(); return d; } return capture('v', 'mark'); });
+    return capture('v', 'mark');
   }
   var busy = false;
 
@@ -268,9 +331,10 @@
     b.disabled = !S.ready || busy;
     b.textContent = !S.ready ? 'লোড হচ্ছে…' : !m.face_registered ? 'মুখ নিবন্ধন করুন' : m.next === 'IN' ? 'IN দিন' : 'OUT দিন';
     if (S.ready && !TM.marks.ready) tmark('ready', performance.now());
+    if (S.ready && m.face_registered && !busy) setTimeout(function () { primeFace(); }, 120);
   }
 
-  function refresh() { var t0 = performance.now(); return call('attendance.me').then(function (m) { if (!TM.marks.me) tmark('me', performance.now() - t0); S.me = m; render(); }); }
+  function refresh() { var t0 = performance.now(); return call('attendance.me').then(function (m) { if (!TM.marks.me) tmark('me', performance.now() - t0); S.me = m; clearPreFace(); render(); }); }
 
   function msg(t, ok) { $('msg').textContent = t; $('msg').className = ok ? 'ok' : 'bad'; }
 
@@ -285,15 +349,19 @@
         .then(descriptor).then(function (d) { samples.push(d); return new Promise(function (r) { setTimeout(r, 700); }); })
         .then(descriptor).then(function (d) { samples.push(d);
           return call('face.registerSelf', { descriptors: samples, model_version: MODEL_VERSION, lat: pos.lat, lng: pos.lng }, true); })
-        .then(function () { msg('নিবন্ধন হয়েছে। এখন হাজিরা দিন।', true); });
+        .then(function (r) {
+          var c = Array(128).fill(0); samples.forEach(function (d) { d.forEach(function (v, i) { c[i] += v; }); }); c = c.map(function (v) { return Math.round((v / samples.length) * 1e5) / 1e5; });
+          S.faceRef = { employee_id: String(m.employee_id), model_version: MODEL_VERSION, cache_version: r.cache_version || '', centroid: c };
+          return cacheFaceRef(S.faceRef).then(function () { msg('নিবন্ধন হয়েছে। এখন হাজিরা দিন।', true); });
+        });
     } else {
       var cid = uid();
-      job = capture('v', 'mark').then(function (d) {                // ordinary IN/OUT: exactly one live capture
+      job = getFastDescriptor().then(function (d) {                // use the fresh RAM pre-capture when available
         var tA = performance.now();
         return call('attendance.self', { client_event_id: cid, descriptor: d, lat: pos.lat, lng: pos.lng, expect_type: m.next }, true).then(function (r) {
           tmark('api_roundtrip', performance.now() - tA); tmark('mark_total', performance.now() - tAct); return r; });
       }).then(function (r) {
-        msg((r.event.event_type === 'IN' ? 'IN সম্পন্ন ' : 'OUT সম্পন্ন ') + r.event.event_time.slice(11, 16) + (r.warnings && r.warnings.length ? ' · ' + r.warnings.join(', ') : ''), true);
+        clearPreFace(); setFaceHint('✓ যাচাই সম্পন্ন', true); msg((r.event.event_type === 'IN' ? 'IN সম্পন্ন ' : 'OUT সম্পন্ন ') + r.event.event_time.slice(11, 16) + (r.warnings && r.warnings.length ? ' · ' + r.warnings.join(', ') : ''), true);
       });
     }
     job.catch(function (e) { msg(e.message || String(e)); }).then(function () { busy = false; return refresh(); }).catch(function () {}).then(function () { busy = false; render(); });
@@ -408,7 +476,7 @@
       if (e.code === 'PASSWORD_CHANGE_REQUIRED') { S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = 'আবার লগইন করে নতুন পাসওয়ার্ড দিন।'; }
       else if (/SESSION|AUTH|DEVICE/.test(e.code || '')) { S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = e.message; } else msg(e.message); });
     Promise.all([startCamera('v'), faceInit()])                       // camera + models (+ warm-up) in parallel with attendance.me
-      .then(function () { S.ready = true; if (S.me) render(); hintLoop(); })
+      .then(function () { S.ready = true; if (S.me) { render(); primeFace(); } else setFaceHint('ক্যামেরা প্রস্তুত', null); })
       .catch(function (e) { msg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
   }
   $('benchBtn').onclick = function () { if (FACE.ready) bench(); };
