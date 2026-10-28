@@ -50,6 +50,14 @@
   .face-stage[data-stage="checking"] .face-scan { display:block; }
   .face-stage[data-stage="ready"] .face-ring, .face-stage[data-stage="success"] .face-ring { border-color:#4ce39c; box-shadow:0 0 0 999px #00000014,0 0 21px #4ce39c88; }
   .face-stage[data-stage="error"] .face-ring { border-color:#ff8a80; }
+  .staff-nav { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:0 0 12px; }
+  .staff-nav button { min-height:80px; margin:0; background:var(--card); color:var(--ink); border:2px solid var(--line); font-size:16px; touch-action:manipulation; }
+  .staff-nav button.active { border-color:var(--pri); background:var(--pri); color:#fff; }
+  .staff-panel.hidden { display:none; }
+  .staff-panel label { font-size:14px; }
+  .staff-panel select,.staff-panel textarea { width:100%; padding:12px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--ink); font:inherit; }
+  .staff-panel .leave-row { padding:12px 0; border-bottom:1px solid var(--line); }
+  .staff-panel .leave-row:last-child { border-bottom:0; }
   @media (prefers-reduced-motion:reduce) { button,.face-ring { transition:none; } .face-scan,button.is-working:before { animation:none; } }
 </style>
 </head>
@@ -89,6 +97,13 @@
     <div class="card"><button class="sec" id="kexit">কিয়স্ক বন্ধ</button><pre id="kdbg" class="hidden"></pre><pre id="kdbgT" class="hidden"></pre></div>
   </div>
   <div class="hidden" id="main">
+    <nav class="staff-nav" aria-label="কর্মীর মেনু">
+      <button type="button" class="active" data-staff-tab="attendance" aria-pressed="true">◉ হাজিরা দিন</button>
+      <button type="button" data-staff-tab="leaveApply" aria-pressed="false">▣ ছুটির আবেদন</button>
+      <button type="button" data-staff-tab="leaveStatus" aria-pressed="false">✓ ছুটির অবস্থা</button>
+      <button type="button" data-staff-tab="profile" aria-pressed="false">♙ আমার তথ্য</button>
+    </nav>
+    <section id="staffAttendance" class="staff-panel">
     <div class="card">
       <div class="muted" id="who"></div>
       <div class="big" id="state">—</div>
@@ -113,6 +128,25 @@
         <button id="crSend">অনুরোধ পাঠান</button><p id="crMsg"></p>
       </details>
     </div>
+    </section>
+    <section id="staffLeaveApply" class="staff-panel hidden">
+      <div class="card"><h2>ছুটির আবেদন</h2>
+        <label for="leaveType">ছুটির ধরন</label><select id="leaveType"><option value="">লোড হচ্ছে…</option></select>
+        <label for="leaveFrom">শুরুর তারিখ</label><input id="leaveFrom" type="date">
+        <label for="leaveTo">শেষের তারিখ</label><input id="leaveTo" type="date">
+        <label for="leaveReason">কারণ</label><textarea id="leaveReason" rows="3" maxlength="500" placeholder="ছুটির কারণ লিখুন"></textarea>
+        <button id="leaveSubmit" type="button">আবেদন জমা দিন</button><p id="leaveSubmitMsg" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+    <section id="staffLeaveStatus" class="staff-panel hidden">
+      <div class="card"><h2>আমার ছুটির অবস্থা</h2><button class="sec" id="leaveRefresh" type="button">আবার দেখুন</button>
+        <div id="leaveRecords" role="status" aria-live="polite">এখনো লোড হয়নি</div>
+      </div>
+    </section>
+    <section id="staffProfile" class="staff-panel hidden">
+      <div class="card"><h2>আমার তথ্য</h2><div id="staffProfileInfo" role="status" aria-live="polite"></div>
+      <p class="muted">তথ্যে ভুল থাকলে HR-এর সঙ্গে যোগাযোগ করুন।</p></div>
+    </section>
     <div class="card hidden" id="dbgCard"><pre id="dbg"></pre><pre id="dbgT"></pre>
       <button class="sec" id="benchBtn">ইনপুট সাইজ বেঞ্চমার্ক (160 / 224 / 320)</button><pre id="benchOut"></pre></div>
   </div>
@@ -147,6 +181,76 @@
   if (DEBUG) { $('dbgCard').classList.remove('hidden'); $('kdbg').classList.remove('hidden'); $('kdbgT').classList.remove('hidden'); }
   function show(id) { ['cfg', 'login', 'pwd', 'main', 'kpick', 'kiosk'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); }); }
   function uid() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/-/g, ''); }
+  var staffTab = 'attendance', leaveTypesLoaded = false, leaveSubmitting = false;
+  function staffText(el, value) { $(el).textContent = value == null ? '' : String(value); }
+  function openStaffTab(tab) {
+    if (['attendance','leaveApply','leaveStatus','profile'].indexOf(tab) < 0) return;
+    staffTab = tab;
+    var panels = { attendance:'staffAttendance', leaveApply:'staffLeaveApply', leaveStatus:'staffLeaveStatus', profile:'staffProfile' };
+    Object.keys(panels).forEach(function (key) { $(panels[key]).classList.toggle('hidden', key !== tab); });
+    document.querySelectorAll('[data-staff-tab]').forEach(function (b) {
+      var selected = b.getAttribute('data-staff-tab') === tab;
+      b.classList.toggle('active', selected); b.setAttribute('aria-pressed', String(selected));
+    });
+    if (tab === 'leaveApply') loadLeaveTypes();
+    if (tab === 'leaveStatus') loadLeaveStatus();
+    if (tab === 'profile') renderStaffProfile();
+  }
+  document.querySelectorAll('[data-staff-tab]').forEach(function (b) {
+    b.addEventListener('click', function () { openStaffTab(b.getAttribute('data-staff-tab')); });
+  });
+  function loadLeaveTypes() {
+    if (leaveTypesLoaded || !S.me) return;
+    staffText('leaveSubmitMsg','ছুটির ধরন লোড হচ্ছে…');
+    call('leave.balance', { employee_id:S.me.employee_id }).then(function (data) {
+      var options = (data && data.balance) || [];
+      var select = $('leaveType'); select.textContent = '';
+      var placeholder = document.createElement('option'); placeholder.value=''; placeholder.textContent='ছুটির ধরন বাছুন'; select.appendChild(placeholder);
+      options.forEach(function (x) {
+        var o=document.createElement('option'); o.value=x.leave_type_code;
+        o.textContent=(x.label_bn || x.label || x.leave_type_code) + (x.remaining === null || x.remaining === undefined ? '' : ' (অবশিষ্ট '+x.remaining+' দিন)');
+        select.appendChild(o);
+      });
+      leaveTypesLoaded = true; staffText('leaveSubmitMsg','');
+    }).catch(function (e) { staffText('leaveSubmitMsg','ছুটির ধরন লোড হয়নি: '+e.message); });
+  }
+  function loadLeaveStatus() {
+    if (!S.me) return;
+    var target = $('leaveRecords'); target.textContent = 'ছুটির আবেদন লোড হচ্ছে…';
+    call('leave.list', { employee_id:S.me.employee_id }).then(function (rows) {
+      target.textContent='';
+      if (!Array.isArray(rows) || !rows.length) { target.textContent='এখনো কোনো ছুটির আবেদন নেই।'; return; }
+      rows.slice(0,30).forEach(function (x) {
+        var div=document.createElement('div'); div.className='leave-row';
+        var title=document.createElement('strong'); title.textContent=(x.leave_type_label || x.leave_type_code || 'ছুটি')+' · '+(x.status || 'PENDING');
+        var dates=document.createElement('div'); dates.className='muted'; dates.textContent=(x.from_date || '')+' → '+(x.to_date || '')+' · '+(x.days || 0)+' দিন';
+        div.appendChild(title); div.appendChild(dates); target.appendChild(div);
+      });
+    }).catch(function (e) { target.textContent='ছুটির তথ্য পাওয়া যায়নি: '+e.message; });
+  }
+  function renderStaffProfile() {
+    if (!S.me) { staffText('staffProfileInfo','তথ্য লোড হচ্ছে…'); return; }
+    var m=S.me;
+    staffText('staffProfileInfo', [m.full_name || '', 'কর্মী আইডি: '+(m.employee_id || ''),
+      'শাখা: '+((m.branch && m.branch.name) || '—'), 'ডিউটির তারিখ: '+(m.work_date || '—')].join('\n'));
+    $('staffProfileInfo').style.whiteSpace='pre-line';
+  }
+  $('leaveRefresh').addEventListener('click',loadLeaveStatus);
+  $('leaveSubmit').addEventListener('click',function () {
+    if (leaveSubmitting || !S.me) return;
+    var type=$('leaveType').value, from=$('leaveFrom').value, to=$('leaveTo').value, reason=$('leaveReason').value.trim();
+    if (!type || !from || !to || !reason) { staffText('leaveSubmitMsg','সব তথ্য পূরণ করুন।'); return; }
+    if (to < from) { staffText('leaveSubmitMsg','শেষের তারিখ শুরুর আগে হতে পারে না।'); return; }
+    leaveSubmitting=true; $('leaveSubmit').disabled=true; staffText('leaveSubmitMsg','আবেদন পাঠানো হচ্ছে…');
+    var rid=uid();
+    call('leave.request',{request_id:rid,employee_id:S.me.employee_id,leave_type_code:type,from_date:from,to_date:to,reason:reason},true)
+      .then(function (res) {
+        staffText('leaveSubmitMsg','আবেদন জমা হয়েছে: '+(res.leave && res.leave.leave_id || '')+'। অনুমোদনের অপেক্ষায়।');
+        $('leaveReason').value=''; leaveTypesLoaded=false;
+      }).catch(function (e) { staffText('leaveSubmitMsg','আবেদন জমা হয়নি: '+e.message); })
+      .then(function () { leaveSubmitting=false; $('leaveSubmit').disabled=false; });
+  });
+
 
   var ERR_BN = { DEVICE_NOT_REGISTERED: 'এই অ্যাকাউন্ট অন্য একটি ফোনে নিবন্ধিত। HR-কে নিবন্ধিত ফোন রিসেট করতে বলুন।',
     DEVICE_ID_REQUIRED: 'অ্যাপ পুরনো — পাতাটি আবার লোড করুন।',
@@ -367,7 +471,7 @@
     if (S.ready && m.face_registered && !busy) setTimeout(function () { primeFace(); }, 120);
   }
 
-  function refresh() { var t0 = performance.now(); return call('attendance.me').then(function (m) { if (!TM.marks.me) tmark('me', performance.now() - t0); S.me = m; clearPreFace(); render(); }); }
+  function refresh() { var t0 = performance.now(); return call('attendance.me').then(function (m) { if (!TM.marks.me) tmark('me', performance.now() - t0); S.me = m; clearPreFace(); render(); if (staffTab === "profile") renderStaffProfile(); }); }
 
   function msg(t, ok) { $('msg').textContent = t; $('msg').className = ok ? 'ok' : 'bad'; }
 
