@@ -127,7 +127,7 @@
   var ERR_BN = { DEVICE_NOT_REGISTERED: 'এই অ্যাকাউন্ট অন্য একটি ফোনে নিবন্ধিত। HR-কে নিবন্ধিত ফোন রিসেট করতে বলুন।',
     DEVICE_ID_REQUIRED: 'অ্যাপ পুরনো — পাতাটি আবার লোড করুন।',
     DEVICE_IN_USE: 'এই ফোন অন্য একজন কর্মীর নামে নিবন্ধিত। এক ফোনে একজন — শাখার কিয়স্ক ব্যবহার করুন বা HR-কে বলুন।',
-    TEMP_PASSWORD_EXPIRED: 'অস্থায়ী পাসওয়ার্ডের মেয়াদ শেষ। HR-এর কাছ থেকে নতুন অস্থায়ী পাসওয়ার্ড নিন।', AUTH_FAILED: 'ইউজারনেম বা পাসওয়ার্ড ভুল।', PASSWORD_WEAK: 'পাসওয়ার্ড দুর্বল: কমপক্ষে ৮ অক্ষর, অক্ষর ও সংখ্যা; আইডি দিয়ে হবে না।' };
+    TEMP_PASSWORD_EXPIRED: 'অস্থায়ী পাসওয়ার্ডের মেয়াদ শেষ। HR-এর কাছ থেকে নতুন অস্থায়ী পাসওয়ার্ড নিন।', DEVICE_APPROVAL_PENDING: 'আপনার ফোনের অনুমোদন অপেক্ষায় আছে। HR-কে Employee 360 থেকে অনুমোদন দিতে বলুন।', AUTH_FAILED: 'ইউজারনেম বা পাসওয়ার্ড ভুল।', PASSWORD_WEAK: 'পাসওয়ার্ড দুর্বল: কমপক্ষে ৮ অক্ষর, অক্ষর ও সংখ্যা; আইডি দিয়ে হবে না।' };
   function call(fn, args, write) {
     var body = { fn: fn, args: args || {}, token: S.token || undefined, requestId: write ? uid() : undefined, perf: DEBUG || undefined };
     var t0 = performance.now();
@@ -314,9 +314,9 @@
     return S.preFaceP;
   }
   function getFastDescriptor() {
-    var p = freshPreFace();
-    if (p) { tmark('pre_used_age', Date.now() - p.at); clearPreFace(); return Promise.resolve(p.descriptor); }
-    if (S.preFaceP) return S.preFaceP.then(function (x) { if (x && Date.now() - x.at <= PRE_FACE_MS) { var d = x.descriptor; clearPreFace(); return d; } return capture('v', 'mark'); });
+    // Phase 7 security: the warm descriptor is only a readiness hint.
+    // Capture a NEW frame after the actual user tap: no stale pre-tap replay.
+    clearPreFace();
     return capture('v', 'mark');
   }
   var busy = false;
