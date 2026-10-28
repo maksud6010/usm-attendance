@@ -32,13 +32,32 @@
   video { width:100%; border-radius:12px; background:#000; aspect-ratio:3/4; object-fit:cover; transform:scaleX(-1); }
   .big { font-size:28px; font-weight:700; } .ok { color:var(--ok); } .bad { color:var(--bad); }
   .hidden { display:none; } pre { white-space:pre-wrap; font-size:11px; color:var(--muted); }
+
+  /* Touch feedback that works on Android as well as desktop. */
+  button { cursor:pointer; min-height:48px; touch-action:manipulation; transition:transform .09s ease,filter .12s ease,box-shadow .12s ease; position:relative; }
+  button:not(:disabled):active, button.is-pressed:not(:disabled) { transform:scale(.975); filter:brightness(.88); box-shadow:inset 0 2px 6px #0002; }
+  button:focus-visible { outline:3px solid var(--pri); outline-offset:2px; }
+  button.is-working { cursor:progress; opacity:.84; padding-left:34px; }
+  button.is-working:before { content:''; position:absolute; width:15px; height:15px; left:12px; top:calc(50% - 8px); border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:spin .75s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .face-stage { position:relative; overflow:hidden; border-radius:12px; background:#10141a; isolation:isolate; }
+  .face-stage video { display:block; border-radius:12px; }
+  .face-ring { pointer-events:none; position:absolute; left:50%; top:46%; transform:translate(-50%,-50%); width: min(61%,240px); aspect-ratio: 3/4; border:3px solid #ffffffab; border-radius:50%; box-shadow:0 0 0 999px #00000017,inset 0 0 18px #0004; transition:border-color .2s,box-shadow .2s; }
+  .face-scan { display:none; position:absolute; left:10%; right:10%; height:2px; top:15%; background:linear-gradient(90deg,transparent,#8de9ff,transparent); box-shadow:0 0 13px #8de9ff; animation:faceSweep 1.7s ease-in-out infinite alternate; }
+  @keyframes faceSweep { from { top:15%; } to { top:83%; } }
+  .face-status { position:absolute; bottom:10px; left:10px; right:10px; border-radius:9px; padding:9px 11px; background:#111c27d9; color:white; text-align:center; font-weight:650; font-size:14px; }
+  .face-stage[data-stage="checking"] .face-ring { border-color:#68d7ff; box-shadow:0 0 0 999px #00000016,0 0 22px #68d7ff88; }
+  .face-stage[data-stage="checking"] .face-scan { display:block; }
+  .face-stage[data-stage="ready"] .face-ring, .face-stage[data-stage="success"] .face-ring { border-color:#4ce39c; box-shadow:0 0 0 999px #00000014,0 0 21px #4ce39c88; }
+  .face-stage[data-stage="error"] .face-ring { border-color:#ff8a80; }
+  @media (prefers-reduced-motion:reduce) { button,.face-ring { transition:none; } .face-scan,button.is-working:before { animation:none; } }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="card" id="cfg">
+  <div class="card hidden" id="cfg">
     <h1>সেটআপ</h1>
-    <label>Apps Script /exec URL</label><input id="url" placeholder="https://script.google.com/macros/s/…/exec">
+    <label>Apps Script /exec URL</label><input id="url" readonly value="https://script.google.com/macros/s/AKfycbwaSVdeYiHIQ5ATfyvkkM1iCDCrxekdwZKed7-K31Yze1C5QAVcQsG7nLYkNleoFqgARQ/exec">
     <button id="saveUrl">সংরক্ষণ</button>
   </div>
   <div class="card hidden" id="login">
@@ -64,7 +83,7 @@
   </div>
   <div class="hidden" id="kiosk">
     <div class="card"><div class="muted">Registered Kiosk</div><div class="big" id="kname">—</div><div class="muted" id="klab"></div><p id="kmsg"></p></div>
-    <div class="card"><video id="kv" autoplay playsinline muted></video><div class="muted" id="ksel">নিচে নিজের নাম বাছুন</div>
+    <div class="card"><div class="face-stage" id="kFaceStage" data-stage="loading"><video id="kv" autoplay playsinline muted></video><div class="face-ring" aria-hidden="true"><div class="face-scan"></div></div><div class="face-status" id="kFaceStatus" role="status" aria-live="polite">ক্যামেরা চালু হচ্ছে…</div></div><div class="muted" id="ksel">নিচে নিজের নাম বাছুন</div>
       <button id="kgo" disabled>—</button></div>
     <div class="card" id="kstaff"></div>
     <div class="card"><button class="sec" id="kexit">কিয়স্ক বন্ধ</button><pre id="kdbg" class="hidden"></pre><pre id="kdbgT" class="hidden"></pre></div>
@@ -77,7 +96,11 @@
       <div class="muted" id="gps">লোকেশন: —</div>
     </div>
     <div class="card">
-      <video id="v" autoplay playsinline muted></video><div class="muted" id="fhint"></div>
+      <div class="face-stage" id="faceStage" data-stage="loading">
+        <video id="v" autoplay playsinline muted></video>
+        <div class="face-ring" aria-hidden="true"><div class="face-scan"></div></div>
+        <div class="face-status" id="faceStatus" role="status" aria-live="polite">ক্যামেরা চালু হচ্ছে…</div>
+      </div><div class="muted" id="fhint" aria-live="polite">মুখ ক্যামেরার মাঝখানে রাখুন</div>
       <button id="act" disabled>লোড হচ্ছে…</button>
       <p id="msg"></p>
       <button class="sec" id="logout">লগআউট</button>
@@ -119,7 +142,8 @@
   function put(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} }
   function uid0() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + String(Math.random()).slice(2)).replace(/[^A-Za-z0-9]/g, ''); }
   var DEV = get('usm_device_id'); if (!DEV) { DEV = uid0(); put('usm_device_id', DEV); }   // this phone/laptop; the server keeps only its hash
-  var S = { url: get('usm_exec'), token: get('usm_att_token'), me: null, pos: null, ready: false, mode: get('usm_mode'), kiosk: null, sel: null, kioskSetup: false, faceRef: null, preFace: null, preFaceP: null, preFaceTimer: null };
+  var DEFAULT_EXEC_URL = 'https://script.google.com/macros/s/AKfycbwaSVdeYiHIQ5ATfyvkkM1iCDCrxekdwZKed7-K31Yze1C5QAVcQsG7nLYkNleoFqgARQ/exec';
+  var S = { url: DEFAULT_EXEC_URL, token: get('usm_att_token'), me: null, pos: null, ready: false, mode: get('usm_mode'), kiosk: null, sel: null, kioskSetup: false, faceRef: null, preFace: null, preFaceP: null, preFaceTimer: null };
   if (DEBUG) { $('dbgCard').classList.remove('hidden'); $('kdbg').classList.remove('hidden'); $('kdbgT').classList.remove('hidden'); }
   function show(id) { ['cfg', 'login', 'pwd', 'main', 'kpick', 'kiosk'].forEach(function (x) { $(x).classList.toggle('hidden', x !== id); }); }
   function uid() { return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/-/g, ''); }
@@ -284,7 +308,16 @@
     }).catch(function () { return null; });
   }
   function localDist(a, b) { if (!a || !b || a.length !== b.length) return null; var x = 0; for (var i = 0; i < a.length; i++) { var d = a[i] - b[i]; x += d * d; } return Math.sqrt(x); }
-  function setFaceHint(text, ok) { var e = $('fhint'); if (!e) return; e.textContent = text; e.className = ok === true ? 'ok' : ok === false ? 'bad' : 'muted'; }
+  function faceStage(which, state, text) { var box = $(which === 'kiosk' ? 'kFaceStage' : 'faceStage'); var label = $(which === 'kiosk' ? 'kFaceStatus' : 'faceStatus'); if (box) box.setAttribute('data-stage', state); if (label) label.textContent = text; }
+  function setFaceHint(text, ok) {
+    var e = $('fhint'); if (!e) return; e.textContent = text; e.className = ok === true ? 'ok' : ok === false ? 'bad' : 'muted';
+    var state = ok === false ? 'error' : ok === true ? 'ready' : /যাচাই|প্রস্তুত হচ্ছে/.test(text) ? 'checking' : 'idle';
+    faceStage('self', state, text.replace(/^✓\s*/, ''));
+  }
+  // Visual feedback is informational, never an attendance approval.
+  function buttonWorking(id, working, label) { var b = $(id); if (!b) return; b.classList.toggle('is-working', !!working); if (working && label) b.textContent = label; }
+  document.addEventListener('pointerdown', function (ev) { var b = ev.target.closest && ev.target.closest('button'); if (b && !b.disabled) b.classList.add('is-pressed'); }, {passive:true});
+  ['pointerup','pointercancel','pointerleave'].forEach(function (eventName) { document.addEventListener(eventName, function () { document.querySelectorAll('button.is-pressed').forEach(function (b) { b.classList.remove('is-pressed'); }); }, {passive:true}); });
   function ensureFaceRef() {
     var m = S.me; if (!m || !m.face_registered) return Promise.resolve(null);
     if (S.faceRef && S.faceRef.cache_version === m.face_cache_version) return Promise.resolve(S.faceRef);
@@ -339,7 +372,7 @@
   function msg(t, ok) { $('msg').textContent = t; $('msg').className = ok ? 'ok' : 'bad'; }
 
   function act() {
-    var m = S.me, b = $('act'); b.disabled = true; busy = true; msg('মুখ যাচাই হচ্ছে…', true);
+    var m = S.me, b = $('act'); if (!m || busy) return; b.disabled = true; busy = true; buttonWorking('act', true, 'যাচাই চলছে…'); setFaceHint('মুখ যাচাই হচ্ছে…', null); msg('মুখ যাচাই হচ্ছে…', true);
     var tAct = performance.now();
     var pos = S.pos || {};
     var job;
@@ -364,13 +397,13 @@
         clearPreFace(); setFaceHint('✓ যাচাই সম্পন্ন', true); msg((r.event.event_type === 'IN' ? 'IN সম্পন্ন ' : 'OUT সম্পন্ন ') + r.event.event_time.slice(11, 16) + (r.warnings && r.warnings.length ? ' · ' + r.warnings.join(', ') : ''), true);
       });
     }
-    job.catch(function (e) { msg(e.message || String(e)); }).then(function () { busy = false; return refresh(); }).catch(function () {}).then(function () { busy = false; render(); });
+    job.catch(function (e) { setFaceHint('যাচাই হয়নি — আবার চেষ্টা করুন', false); msg(e.message || String(e)); }).then(function () { busy = false; buttonWorking('act', false); return refresh(); }).catch(function () {}).then(function () { busy = false; buttonWorking('act', false); if (S.me) render(); });
   }
 
-  $('saveUrl').onclick = function () { S.url = $('url').value.trim(); put('usm_exec', S.url); boot(); };
+  $('saveUrl').onclick = function () { S.url = DEFAULT_EXEC_URL; boot(); };
   var lastPwd = '';                                                       // kept in memory only for the first-login change
   var loginBusy = false;
-  function setLoginBusy(b) { loginBusy = b; $('doLogin').disabled = b; $('doKiosk').disabled = b; }
+  function setLoginBusy(b) { loginBusy = b; $('doLogin').disabled = b; $('doKiosk').disabled = b; buttonWorking('doLogin', b, 'লগইন হচ্ছে…'); buttonWorking('doKiosk', b, 'যাচাই হচ্ছে…'); if (!b) { $('doLogin').textContent = 'লগইন'; $('doKiosk').textContent = 'ম্যানেজার: এই ল্যাপটপ কিয়স্ক হিসেবে নিবন্ধন করুন'; } }
   function login(kioskSetup) {
     if (loginBusy) return;                                                 // a second tap must not start a second login
     $('lmsg').textContent = '';
@@ -436,15 +469,15 @@
     });
   }
   $('kgo').onclick = function () {
-    var p = S.sel; if (!p) return; $('kgo').disabled = true; kmsg('মুখ যাচাই হচ্ছে…', true);
+    var p = S.sel; if (!p || $('kgo').disabled) return; $('kgo').disabled = true; buttonWorking('kgo', true, 'মুখ যাচাই হচ্ছে…'); faceStage('kiosk', 'checking', 'মুখ যাচাই হচ্ছে…'); kmsg('মুখ যাচাই হচ্ছে…', true);
     var tAct = performance.now();
     capture('kv', 'kiosk').then(function (d) {
       var tA = performance.now();
       return call('kiosk.mark', { client_event_id: uid(), employee_id: p.employee_id, descriptor: d, expect_type: p.next }, true)
         .then(function (r) { tmark('api_roundtrip', performance.now() - tA); tmark('mark_total', performance.now() - tAct); return r; });
-    }).then(function (r) { kmsg(p.full_name + ': ' + r.event.event_type + ' ' + r.event.event_time.slice(11, 16), true); })
-      .catch(function (e) { kmsg(e.message); })
-      .then(function () { S.sel = null; $('ksel').textContent = 'নিচে নিজের নাম বাছুন'; $('kgo').textContent = '—'; return kload(); }).catch(function () {});
+    }).then(function (r) { faceStage('kiosk', 'success', '✓ হাজিরা সম্পন্ন'); kmsg(p.full_name + ': ' + r.event.event_type + ' ' + r.event.event_time.slice(11, 16), true); })
+      .catch(function (e) { faceStage('kiosk', 'error', 'মুখ যাচাই হয়নি'); kmsg(e.message); })
+      .then(function () { buttonWorking('kgo', false); S.sel = null; $('ksel').textContent = 'নিচে নিজের নাম বাছুন'; $('kgo').textContent = '—'; return kload(); }).catch(function () {});
   };
   $('kexit').onclick = function () {
     if (!confirm('কিয়স্ক বন্ধ করবেন? এই ল্যাপটপের নিবন্ধন বাতিল হবে; আবার চালু করতে ম্যানেজারকে নিবন্ধন করতে হবে।')) return;
@@ -468,7 +501,7 @@
       show('kiosk');
       kload().catch(function (e) { if (/AUTH/.test(e.code || '')) { S.token = ''; S.mode = ''; put('usm_att_token', ''); put('usm_mode', ''); show('login'); $('lmsg').textContent = 'এই কিয়স্কের নিবন্ধন বাতিল হয়েছে — ম্যানেজার দিয়ে আবার নিবন্ধন করুন।'; } else kmsg(e.message); });
       Promise.all([startCamera('kv'), faceInit()])                    // camera + models (+ warm-up) in parallel with the staff list
-        .then(function () { S.ready = true; tmark('ready', performance.now()); if (S.sel) $('kgo').disabled = false; }).catch(function (e) { kmsg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
+        .then(function () { S.ready = true; faceStage('kiosk', 'idle', 'মুখ বৃত্তের মাঝখানে রাখুন'); tmark('ready', performance.now()); if (S.sel) $('kgo').disabled = false; }).catch(function (e) { kmsg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
       return;
     }
     show('main'); watchGps();
@@ -476,7 +509,7 @@
       if (e.code === 'PASSWORD_CHANGE_REQUIRED') { S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = 'আবার লগইন করে নতুন পাসওয়ার্ড দিন।'; }
       else if (/SESSION|AUTH|DEVICE/.test(e.code || '')) { S.token = ''; put('usm_att_token', ''); show('login'); $('lmsg').textContent = e.message; } else msg(e.message); });
     Promise.all([startCamera('v'), faceInit()])                       // camera + models (+ warm-up) in parallel with attendance.me
-      .then(function () { S.ready = true; if (S.me) { render(); primeFace(); } else setFaceHint('ক্যামেরা প্রস্তুত', null); })
+      .then(function () { S.ready = true; faceStage('self', 'idle', 'মুখ বৃত্তের মাঝখানে রাখুন'); if (S.me) { render(); primeFace(); } else setFaceHint('ক্যামেরা প্রস্তুত', null); })
       .catch(function (e) { msg('ক্যামেরা/মডেল চালু হয়নি: ' + e.message); });
   }
   $('benchBtn').onclick = function () { if (FACE.ready) bench(); };
